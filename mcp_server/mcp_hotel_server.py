@@ -1,5 +1,5 @@
 """
-mcp_hotel_server.py：酒店 MCP 服务器，负责酒店查询、酒店预订和酒店订单查询。
+mcp_hotel_server.py：酒店 MCP 服务器，负责酒店查询、酒店预订、酒店订单查询、取消与改期。
 """
 import json
 import os
@@ -20,7 +20,7 @@ conf = Config()
 
 hotel_mcp = FastMCP(
     name="HotelTools",
-    instructions="酒店工具，支持酒店查询、酒店预订和酒店订单查询。",
+    instructions="酒店工具，支持酒店查询、酒店预订、酒店订单查询、酒店取消与酒店改期。",
     log_level="ERROR",
     host="127.0.0.1",
     port=8004,
@@ -125,11 +125,10 @@ class HotelService:
             if isinstance(hotel, str):
                 conn.rollback()
                 return hotel
+            resolved_city = str(hotel.get("city") or city).strip()
+            resolved_hotel_name = str(hotel.get("name") or hotel_name).strip()
 
-            stay_dates = [
-                (datetime.strptime(check_in_date, "%Y-%m-%d") + timedelta(days=offset)).strftime("%Y-%m-%d")
-                for offset in range(nights)
-            ]
+            stay_dates = self._build_stay_dates(check_in_date, nights)
             inventory_rows = self._find_inventory_rows(
                 cursor,
                 hotel_id=hotel["id"],
@@ -144,86 +143,55 @@ class HotelService:
             duplicate = self._find_duplicate_order(
                 cursor=cursor,
                 user_id=user_id,
-                city=city,
-                hotel_name=hotel_name,
+                city=resolved_city,
+                hotel_name=resolved_hotel_name,
                 room_type=room_type,
                 check_in_date=check_in_date,
+                stay_nights=nights,
             )
             if duplicate:
                 conn.rollback()
                 return (
-                    f"检测到重复酒店订单：您已预订 {check_in_date} 入住的 {hotel_name} "
+                    f"检测到重复酒店订单：您已预订 {check_in_date} 入住的 {resolved_hotel_name} "
                     f"{room_type} {duplicate['quantity']}间，{duplicate['stay_nights']}晚。"
                 )
 
-            for row in inventory_rows:
-                if row["remaining_rooms"] < rooms:
-                    conn.rollback()
-                    return (
-                        f"余房不足：{hotel_name} {room_type} 在 {row['stay_date']} "
-                        f"仅剩 {row['remaining_rooms']} 间。"
-                    )
+            inventory_error = self._ensure_inventory_enough(inventory_rows, rooms, resolved_hotel_name, room_type)
+            if inventory_error:
+                conn.rollback()
+                return inventory_error
 
-            for row in inventory_rows:
-                cursor.execute(
-                    """
-                    UPDATE hotel_room_inventory
-                    SET remaining_rooms = remaining_rooms - %s
-                    WHERE id = %s
-                    """,
-                    (rooms, row["id"]),
-                )
-
+            self._deduct_inventory_rows(cursor, inventory_rows, rooms)
             unit_price = Decimal(str(inventory_rows[0]["price_per_night"]))
-            total_price = unit_price * nights * rooms
+            total_price = self._total_price_for_inventory(inventory_rows, rooms)
             payload = {
                 "hotel_id": hotel["id"],
-                "hotel_name": hotel_name,
+                "hotel_name": resolved_hotel_name,
                 "room_type": room_type,
                 "check_in_date": check_in_date,
                 "nights": nights,
                 "rooms": rooms,
             }
-            cursor.execute(
-                """
-                INSERT INTO orders (
-                    user_id,
-                    order_type,
-                    status,
-                    departure_city,
-                    arrival_city,
-                    departure_time,
-                    ticket_or_room_type,
-                    transport_no,
-                    hotel_name,
-                    stay_nights,
-                    quantity,
-                    unit_price,
-                    total_price,
-                    raw_order_payload
-                ) VALUES (%s, 'hotel', 'booked', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    user_id,
-                    city,
-                    city,
-                    f"{check_in_date} 14:00:00",
-                    room_type,
-                    hotel_name,
-                    hotel_name,
-                    nights,
-                    rooms,
-                    unit_price,
-                    total_price,
-                    json.dumps(payload, ensure_ascii=False),
-                ),
+            self._insert_hotel_order(
+                cursor=cursor,
+                user_id=user_id,
+                city=resolved_city,
+                hotel_name=resolved_hotel_name,
+                room_type=room_type,
+                check_in_date=check_in_date,
+                nights=nights,
+                rooms=rooms,
+                unit_price=unit_price,
+                total_price=total_price,
+                raw_payload=payload,
             )
             order_id = cursor.lastrowid
             conn.commit()
+            price_summary = self._format_price_summary(inventory_rows, rooms)
             return (
                 f"酒店预订成功，订单号 {order_id}。"
-                f"{check_in_date} 入住 {city} {hotel_name}，{room_type} {rooms}间，{nights}晚，"
-                f"每晚 {unit_price} 元，总价 {total_price} 元。"
+                f"{check_in_date} 入住 {resolved_city} {resolved_hotel_name}，{room_type} {rooms}间，{nights}晚，"
+                f"{price_summary}，总价 {total_price} 元。"
             )
         except Exception as exc:
             conn.rollback()
@@ -232,19 +200,244 @@ class HotelService:
         finally:
             conn.close()
 
+    def cancel_hotel_order(
+        self,
+        username: str,
+        city: str = "",
+        hotel_name: str = "",
+        room_type: str = "",
+        check_in_date: str = "",
+    ) -> str:
+        conn = get_db_connection(self.config)
+        try:
+            conn.start_transaction()
+            cursor = conn.cursor(dictionary=True)
+            user_id = self._get_user_id(cursor, username)
+            order = self._find_single_booked_hotel_order(
+                cursor=cursor,
+                user_id=user_id,
+                city=city,
+                hotel_name=hotel_name,
+                room_type=room_type,
+                check_in_date=check_in_date,
+                for_update=True,
+            )
+            if isinstance(order, str):
+                conn.rollback()
+                return order
+
+            self._restore_hotel_inventory(cursor, order)
+            cursor.execute("UPDATE orders SET status = 'cancelled' WHERE id = %s", (order["id"],))
+            conn.commit()
+            return (
+                f"酒店取消成功：已取消订单#{order['id']}，"
+                f"{str(order['departure_time'])[:10]} 入住 {order['departure_city']} {order['hotel_name']}，"
+                f"{order['ticket_or_room_type']} {order['quantity']}间，{order['stay_nights']}晚。"
+            )
+        except Exception as exc:
+            conn.rollback()
+            logger.error(f"酒店取消失败: {exc}")
+            return f"酒店取消失败：{exc}"
+        finally:
+            conn.close()
+
+    def change_hotel_order(
+        self,
+        username: str,
+        current_city: str = "",
+        current_hotel_name: str = "",
+        current_room_type: str = "",
+        current_check_in_date: str = "",
+        new_city: str = "",
+        new_hotel_name: str = "",
+        new_room_type: str = "",
+        new_check_in_date: str = "",
+        new_nights: int = 0,
+    ) -> str:
+        has_new_target = any([new_city, new_hotel_name, new_room_type, new_check_in_date, new_nights > 0])
+        if not has_new_target:
+            return "酒店改期/改订至少需要提供新的入住日期、酒店、城市、房型或晚数。"
+
+        conn = get_db_connection(self.config)
+        try:
+            conn.start_transaction()
+            cursor = conn.cursor(dictionary=True)
+            user_id = self._get_user_id(cursor, username)
+            current_order = self._find_single_booked_hotel_order(
+                cursor=cursor,
+                user_id=user_id,
+                city=current_city,
+                hotel_name=current_hotel_name,
+                room_type=current_room_type,
+                check_in_date=current_check_in_date,
+                for_update=True,
+            )
+            if isinstance(current_order, str):
+                conn.rollback()
+                return current_order
+
+            target_city = new_city or str(current_order["departure_city"])
+            target_hotel_name = new_hotel_name or str(current_order["hotel_name"])
+            target_room_type = new_room_type or str(current_order["ticket_or_room_type"])
+            target_check_in_date = new_check_in_date or str(current_order["departure_time"])[:10]
+            target_nights = new_nights if new_nights > 0 else int(current_order["stay_nights"])
+
+            if (
+                target_city == str(current_order["departure_city"])
+                and target_hotel_name == str(current_order["hotel_name"])
+                and target_room_type == str(current_order["ticket_or_room_type"])
+                and target_check_in_date == str(current_order["departure_time"])[:10]
+                and target_nights == int(current_order["stay_nights"])
+            ):
+                conn.rollback()
+                return "改期目标和当前酒店订单完全一致，无需改期。"
+
+            hotel = self._find_hotel(cursor, city=target_city, hotel_name=target_hotel_name)
+            if isinstance(hotel, str):
+                conn.rollback()
+                return hotel
+
+            stay_dates = self._build_stay_dates(target_check_in_date, target_nights)
+            inventory_rows = self._find_inventory_rows(
+                cursor,
+                hotel_id=int(hotel["id"]),
+                room_type=target_room_type,
+                stay_dates=stay_dates,
+                for_update=True,
+            )
+            if isinstance(inventory_rows, str):
+                conn.rollback()
+                return inventory_rows
+
+            duplicate = self._find_duplicate_order(
+                cursor=cursor,
+                user_id=user_id,
+                city=target_city,
+                hotel_name=target_hotel_name,
+                room_type=target_room_type,
+                check_in_date=target_check_in_date,
+                stay_nights=target_nights,
+                exclude_order_id=int(current_order["id"]),
+            )
+            if duplicate:
+                conn.rollback()
+                return (
+                    f"酒店改期失败：您已存在相同目标订单，"
+                    f"{target_check_in_date} 入住 {target_hotel_name} {target_room_type} "
+                    f"{duplicate['quantity']}间，{duplicate['stay_nights']}晚。"
+                )
+
+            inventory_error = self._ensure_inventory_enough(
+                inventory_rows,
+                int(current_order["quantity"]),
+                target_hotel_name,
+                target_room_type,
+            )
+            if inventory_error:
+                conn.rollback()
+                return inventory_error
+
+            self._restore_hotel_inventory(cursor, current_order)
+            self._deduct_inventory_rows(cursor, inventory_rows, int(current_order["quantity"]))
+            cursor.execute("UPDATE orders SET status = 'changed' WHERE id = %s", (current_order["id"],))
+
+            unit_price = Decimal(str(inventory_rows[0]["price_per_night"]))
+            total_price = self._total_price_for_inventory(inventory_rows, int(current_order["quantity"]))
+            payload = {
+                "previous_order_id": current_order["id"],
+                "action": "change",
+                "username": username,
+                "city": target_city,
+                "hotel_name": target_hotel_name,
+                "room_type": target_room_type,
+                "check_in_date": target_check_in_date,
+                "nights": target_nights,
+                "rooms": int(current_order["quantity"]),
+            }
+            self._insert_hotel_order(
+                cursor=cursor,
+                user_id=user_id,
+                city=target_city,
+                hotel_name=target_hotel_name,
+                room_type=target_room_type,
+                check_in_date=target_check_in_date,
+                nights=target_nights,
+                rooms=int(current_order["quantity"]),
+                unit_price=unit_price,
+                total_price=total_price,
+                raw_payload=payload,
+            )
+            new_order_id = cursor.lastrowid
+            conn.commit()
+            price_summary = self._format_price_summary(inventory_rows, int(current_order["quantity"]))
+            return (
+                f"酒店改期成功：原订单#{current_order['id']} 已变更，"
+                f"新订单#{new_order_id} 为 {target_check_in_date} 入住 {target_city} {target_hotel_name}，"
+                f"{target_room_type} {current_order['quantity']}间，{target_nights}晚，"
+                f"{price_summary}，总价 {total_price} 元。"
+            )
+        except Exception as exc:
+            conn.rollback()
+            logger.error(f"酒店改期失败: {exc}")
+            return f"酒店改期失败：{exc}"
+        finally:
+            conn.close()
+
     @staticmethod
     def _find_hotel(cursor, *, city: str, hotel_name: str):
+        normalized_city = city.strip()
+        normalized_hotel_name = hotel_name.strip()
+        if not normalized_hotel_name:
+            return "请补充酒店名称。"
+
+        if normalized_city:
+            cursor.execute(
+                """
+                SELECT *
+                FROM hotels
+                WHERE city = %s AND name = %s
+                LIMIT 1
+                """,
+                (normalized_city, normalized_hotel_name),
+            )
+            row = cursor.fetchone()
+            if row:
+                return row
+
         cursor.execute(
             """
             SELECT *
             FROM hotels
-            WHERE city = %s AND name = %s
-            LIMIT 1
+            WHERE name = %s
+            ORDER BY id ASC
             """,
-            (city, hotel_name),
+            (normalized_hotel_name,),
         )
-        row = cursor.fetchone()
-        return row or f"未找到酒店：{city} {hotel_name}。"
+        exact_rows = cursor.fetchall()
+        if len(exact_rows) == 1:
+            return exact_rows[0]
+        if len(exact_rows) > 1:
+            cities = "、".join(str(row["city"]) for row in exact_rows)
+            return f"匹配到多家酒店：{normalized_hotel_name}，请补充城市，例如 {cities}。"
+
+        cursor.execute(
+            """
+            SELECT *
+            FROM hotels
+            WHERE name LIKE %s
+            ORDER BY id ASC
+            """,
+            (f"%{normalized_hotel_name}%",),
+        )
+        fuzzy_rows = cursor.fetchall()
+        if len(fuzzy_rows) == 1:
+            return fuzzy_rows[0]
+        if len(fuzzy_rows) > 1:
+            options = "；".join(f"{row['city']} {row['name']}" for row in fuzzy_rows[:3])
+            return f"匹配到多家酒店，请进一步确认酒店名或城市：{options}。"
+
+        city_text = f"{normalized_city} " if normalized_city else ""
+        return f"未找到酒店：{city_text}{normalized_hotel_name}。"
 
     @staticmethod
     def _find_inventory_rows(cursor, *, hotel_id: int, room_type: str, stay_dates: list[str], for_update: bool = False):
@@ -276,10 +469,11 @@ class HotelService:
         hotel_name: str,
         room_type: str,
         check_in_date: str,
+        stay_nights: int,
+        exclude_order_id: int | None = None,
     ):
-        cursor.execute(
-            """
-            SELECT quantity, stay_nights
+        sql = """
+            SELECT id, quantity, stay_nights
             FROM orders
             WHERE user_id = %s
               AND order_type = 'hotel'
@@ -288,11 +482,177 @@ class HotelService:
               AND hotel_name = %s
               AND ticket_or_room_type = %s
               AND DATE(departure_time) = %s
-            LIMIT 1
-            """,
-            (user_id, city, hotel_name, room_type, check_in_date),
-        )
+              AND stay_nights = %s
+        """
+        params: list[object] = [user_id, city, hotel_name, room_type, check_in_date, stay_nights]
+        if exclude_order_id is not None:
+            sql += " AND id <> %s"
+            params.append(exclude_order_id)
+        sql += " LIMIT 1"
+        cursor.execute(sql, params)
         return cursor.fetchone()
+
+    def _find_single_booked_hotel_order(
+        self,
+        *,
+        cursor,
+        user_id: int,
+        city: str = "",
+        hotel_name: str = "",
+        room_type: str = "",
+        check_in_date: str = "",
+        for_update: bool = False,
+    ):
+        filters = ["user_id = %s", "order_type = 'hotel'", "status = 'booked'"]
+        params: list[object] = [user_id]
+        if city:
+            filters.append("departure_city = %s")
+            params.append(city)
+        if hotel_name:
+            filters.append("hotel_name = %s")
+            params.append(hotel_name)
+        if room_type:
+            filters.append("ticket_or_room_type = %s")
+            params.append(room_type)
+        if check_in_date:
+            filters.append("DATE(departure_time) = %s")
+            params.append(check_in_date)
+
+        lock_clause = " FOR UPDATE" if for_update else ""
+        cursor.execute(
+            f"""
+            SELECT *
+            FROM orders
+            WHERE {' AND '.join(filters)}
+            ORDER BY departure_time ASC, id ASC
+            {lock_clause}
+            """,
+            params,
+        )
+        orders = cursor.fetchall()
+        if not orders:
+            return "未找到符合条件的已预订酒店订单，请补充更具体的酒店名、入住日期或房型。"
+        if len(orders) > 1:
+            return "匹配到多条酒店订单，请补充更具体的酒店名、入住日期或房型信息。"
+        return orders[0]
+
+    def _restore_hotel_inventory(self, cursor, order: dict) -> None:
+        stay_dates = self._build_stay_dates(str(order["departure_time"])[:10], int(order["stay_nights"]))
+        placeholders = ", ".join(["%s"] * len(stay_dates))
+        cursor.execute(
+            f"""
+            UPDATE hotel_room_inventory i
+            JOIN hotels h ON h.id = i.hotel_id
+            SET i.remaining_rooms = i.remaining_rooms + %s
+            WHERE h.city = %s
+              AND h.name = %s
+              AND i.room_type = %s
+              AND i.stay_date IN ({placeholders})
+            """,
+            [
+                int(order["quantity"]),
+                order["departure_city"],
+                order["hotel_name"],
+                order["ticket_or_room_type"],
+                *stay_dates,
+            ],
+        )
+
+    @staticmethod
+    def _deduct_inventory_rows(cursor, inventory_rows: list[dict], rooms: int) -> None:
+        for row in inventory_rows:
+            cursor.execute(
+                """
+                UPDATE hotel_room_inventory
+                SET remaining_rooms = remaining_rooms - %s
+                WHERE id = %s
+                """,
+                (rooms, row["id"]),
+            )
+
+    @staticmethod
+    def _format_price_summary(inventory_rows: list[dict], rooms: int) -> str:
+        nightly_prices = [Decimal(str(row["price_per_night"])) * rooms for row in inventory_rows]
+        if not nightly_prices:
+            return "价格待确认"
+        if len(nightly_prices) == 1:
+            return f"每晚 {nightly_prices[0]} 元"
+        joined = " + ".join(str(price) for price in nightly_prices)
+        return f"分晚房费 {joined}"
+
+    @staticmethod
+    def _ensure_inventory_enough(inventory_rows: list[dict], rooms: int, hotel_name: str, room_type: str) -> str:
+        for row in inventory_rows:
+            if row["remaining_rooms"] < rooms:
+                return (
+                    f"余房不足：{hotel_name} {room_type} 在 {row['stay_date']} "
+                    f"仅剩 {row['remaining_rooms']} 间。"
+                )
+        return ""
+
+    @staticmethod
+    def _total_price_for_inventory(inventory_rows: list[dict], rooms: int) -> Decimal:
+        total = Decimal("0")
+        for row in inventory_rows:
+            total += Decimal(str(row["price_per_night"]))
+        return total * rooms
+
+    @staticmethod
+    def _build_stay_dates(check_in_date: str, nights: int) -> list[str]:
+        return [
+            (datetime.strptime(check_in_date, "%Y-%m-%d") + timedelta(days=offset)).strftime("%Y-%m-%d")
+            for offset in range(nights)
+        ]
+
+    @staticmethod
+    def _insert_hotel_order(
+        *,
+        cursor,
+        user_id: int,
+        city: str,
+        hotel_name: str,
+        room_type: str,
+        check_in_date: str,
+        nights: int,
+        rooms: int,
+        unit_price: Decimal,
+        total_price: Decimal,
+        raw_payload: dict,
+    ) -> None:
+        cursor.execute(
+            """
+            INSERT INTO orders (
+                user_id,
+                order_type,
+                status,
+                departure_city,
+                arrival_city,
+                departure_time,
+                ticket_or_room_type,
+                transport_no,
+                hotel_name,
+                stay_nights,
+                quantity,
+                unit_price,
+                total_price,
+                raw_order_payload
+            ) VALUES (%s, 'hotel', 'booked', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                user_id,
+                city,
+                city,
+                f"{check_in_date} 14:00:00",
+                room_type,
+                hotel_name,
+                hotel_name,
+                nights,
+                rooms,
+                unit_price,
+                total_price,
+                json.dumps(raw_payload, ensure_ascii=False),
+            ),
+        )
 
     def _get_user_id(self, cursor, username: str) -> int:
         cursor.execute("SELECT id FROM users WHERE username = %s LIMIT 1", (username,))
@@ -352,6 +712,56 @@ def order_hotel_room(
 def query_user_hotel_orders(username: str, check_in_date: str = "") -> str:
     logger.info(f"正在查询酒店订单: {username}, check_in_date={check_in_date}")
     return service.query_user_hotel_orders(username, check_in_date)
+
+
+@hotel_mcp.tool(
+    name="cancel_hotel_order",
+    description="根据用户名和订单特征取消已预订酒店订单，并自动回补库存"
+)
+def cancel_hotel_order(
+    username: str,
+    city: str = "",
+    hotel_name: str = "",
+    room_type: str = "",
+    check_in_date: str = "",
+) -> str:
+    logger.info(f"正在取消酒店订单: {username}, {city}, {hotel_name}, {room_type}, {check_in_date}")
+    return service.cancel_hotel_order(username, city, hotel_name, room_type, check_in_date)
+
+
+@hotel_mcp.tool(
+    name="change_hotel_order",
+    description="根据用户名和当前订单信息执行酒店改期/改订，会回补原库存并扣减目标库存"
+)
+def change_hotel_order(
+    username: str,
+    current_city: str = "",
+    current_hotel_name: str = "",
+    current_room_type: str = "",
+    current_check_in_date: str = "",
+    new_city: str = "",
+    new_hotel_name: str = "",
+    new_room_type: str = "",
+    new_check_in_date: str = "",
+    new_nights: int = 0,
+) -> str:
+    logger.info(
+        "正在酒店改期: "
+        f"{username}, {current_city}, {current_hotel_name}, {current_room_type}, {current_check_in_date}, "
+        f"{new_city}, {new_hotel_name}, {new_room_type}, {new_check_in_date}, {new_nights}"
+    )
+    return service.change_hotel_order(
+        username=username,
+        current_city=current_city,
+        current_hotel_name=current_hotel_name,
+        current_room_type=current_room_type,
+        current_check_in_date=current_check_in_date,
+        new_city=new_city,
+        new_hotel_name=new_hotel_name,
+        new_room_type=new_room_type,
+        new_check_in_date=new_check_in_date,
+        new_nights=new_nights,
+    )
 
 
 def create_hotel_mcp_server():

@@ -1,5 +1,5 @@
 """
-hotel_server.py：酒店代理服务器，支持酒店查询、酒店预订和酒店订单查询。
+hotel_server.py：酒店代理服务器，支持酒店查询、酒店预订、酒店订单查询、取消与改期。
 统一采用 LangGraph state + LLM 结构化抽取 slots + 后端强校验 + pending_context 多轮补参。
 """
 import asyncio
@@ -35,18 +35,20 @@ PENDING_CONTEXT_PATTERN = re.compile(
 
 agent_card = AgentCard(
     name="HotelAssistant",
-    description="提供酒店查询、酒店预订和酒店订单查询服务的助手",
+    description="提供酒店查询、酒店预订、酒店订单查询、取消与改期服务的助手",
     url="http://localhost:5008",
-    version="1.1.0",
+    version="1.2.0",
     capabilities={"streaming": True, "memory": True},
     skills=[
         AgentSkill(
-            name="execute hotel query and order",
-            description="根据客户端提供的输入执行酒店查询、酒店预订和酒店订单查询",
+            name="execute hotel workflow",
+            description="根据客户端提供的输入执行酒店查询、酒店预订、酒店订单查询、取消与改期",
             examples=[
                 "查询2026-03-21上海的酒店",
                 "帮我订2026-03-21上海外滩云际酒店的高级大床房，住2晚1间",
                 "查询我的酒店订单",
+                "取消我订的2026-03-21上海外滩云际酒店",
+                "把我2026-03-21上海外滩云际酒店改到2026-03-22",
             ],
         )
     ],
@@ -59,11 +61,16 @@ class HotelWorkflowState(TypedDict, total=False):
     clean_query: str
     username: str
     domain: Literal["hotel"]
-    action: Literal["query_hotels", "query_hotel_orders", "create_hotel_order"]
+    action: Literal[
+        "query_hotels",
+        "query_hotel_orders",
+        "create_hotel_order",
+        "cancel_hotel_order",
+        "change_hotel_order",
+    ]
     slots: dict[str, Any]
     missing_slots: list[str]
     pending_context: dict[str, Any]
-    execution_payload: dict[str, Any]
     final_text: str
     final_state: Literal["completed", "failed", "input_required"]
     next_pending_context: dict[str, Any]
@@ -121,12 +128,17 @@ def merge_hotel_slots(extraction: HotelWorkflowExtractionResult, pending_context
         "check_in_date": extraction.check_in_date,
         "nights": extraction.nights,
         "rooms": extraction.rooms,
+        "new_city": extraction.new_city,
+        "new_hotel_name": extraction.new_hotel_name,
+        "new_room_type": extraction.new_room_type,
+        "new_check_in_date": extraction.new_check_in_date,
+        "new_nights": extraction.new_nights,
     }
     for key, value in explicit_slots.items():
         if isinstance(value, str):
             if value.strip():
                 merged[key] = value.strip()
-        elif value is not None:
+        elif value is not None and value != 0:
             merged[key] = value
     if "nights" not in merged or int(merged.get("nights", 1)) <= 0:
         merged["nights"] = 1
@@ -143,31 +155,76 @@ def normalize_missing_slots(action: str, slots: dict[str, Any]) -> list[str]:
         if not str(slots.get("check_in_date", "")).strip():
             missing.append("check_in_date")
         return missing
+
     if action == "create_hotel_order":
         missing = []
         for field in ("hotel_name", "room_type", "check_in_date"):
             if not str(slots.get(field, "")).strip():
                 missing.append(field)
         return missing
+
+    if action == "cancel_hotel_order":
+        has_selector = bool(
+            (str(slots.get("hotel_name", "")).strip() and str(slots.get("check_in_date", "")).strip())
+            or (
+                str(slots.get("city", "")).strip()
+                and str(slots.get("check_in_date", "")).strip()
+                and str(slots.get("room_type", "")).strip()
+            )
+        )
+        return [] if has_selector else ["current_hotel_selector"]
+
+    if action == "change_hotel_order":
+        missing: list[str] = []
+        has_selector = bool(
+            (str(slots.get("hotel_name", "")).strip() and str(slots.get("check_in_date", "")).strip())
+            or (
+                str(slots.get("city", "")).strip()
+                and str(slots.get("check_in_date", "")).strip()
+                and str(slots.get("room_type", "")).strip()
+            )
+        )
+        if not has_selector:
+            missing.append("current_hotel_selector")
+        has_new_target = any(
+            [
+                str(slots.get("new_city", "")).strip(),
+                str(slots.get("new_hotel_name", "")).strip(),
+                str(slots.get("new_room_type", "")).strip(),
+                str(slots.get("new_check_in_date", "")).strip(),
+                int(slots.get("new_nights", 0)) > 0,
+            ]
+        )
+        if not has_new_target:
+            missing.append("new_hotel_target")
+        return missing
+
     return []
 
 
 def default_follow_up_message(action: str, missing_slots: list[str]) -> str:
     if action == "query_hotels":
-        messages = {
-            "city": "城市",
-            "check_in_date": "入住日期",
-        }
+        messages = {"city": "城市", "check_in_date": "入住日期"}
         joined = "、".join(messages[item] for item in missing_slots if item in messages) or "酒店查询条件"
         return f"请补充{joined}，例如查询2026-03-21上海的酒店。"
+
     if action == "create_hotel_order":
-        messages = {
-            "hotel_name": "酒店名",
-            "room_type": "房型",
-            "check_in_date": "入住日期",
-        }
+        messages = {"hotel_name": "酒店名", "room_type": "房型", "check_in_date": "入住日期"}
         joined = "、".join(messages[item] for item in missing_slots if item in messages) or "酒店预订信息"
         return f"请补充{joined}，我再继续帮你预订酒店。"
+
+    if action == "cancel_hotel_order":
+        return "请补充更具体的酒店订单信息，例如酒店名加入住日期，或城市、入住日期和房型。"
+
+    if action == "change_hotel_order":
+        messages: list[str] = []
+        if "current_hotel_selector" in missing_slots:
+            messages.append("当前酒店订单的酒店名+入住日期，或城市+入住日期+房型")
+        if "new_hotel_target" in missing_slots:
+            messages.append("新的入住日期、酒店、房型或晚数")
+        joined = "、".join(messages) if messages else "酒店改期信息"
+        return f"请补充{joined}，我再继续帮你改期。"
+
     return "请补充更具体的酒店信息。"
 
 
@@ -176,7 +233,7 @@ def build_pending_context_payload(action: str, query: str, slots: dict[str, Any]
         domain="hotel",
         action=action,
         missing_slots=missing_slots,
-        slots={key: value for key, value in slots.items() if value not in ("", None)},
+        slots={key: value for key, value in slots.items() if value not in ("", None, 0)},
         original_query=query,
     )
     return payload.model_dump()
@@ -194,6 +251,8 @@ class HotelAssistantServer(A2AServer):
         workflow.add_node("query_hotels", self._query_hotels_node)
         workflow.add_node("query_hotel_orders", self._query_hotel_orders_node)
         workflow.add_node("create_hotel_order", self._create_hotel_order_node)
+        workflow.add_node("cancel_hotel_order", self._cancel_hotel_order_node)
+        workflow.add_node("change_hotel_order", self._change_hotel_order_node)
 
         workflow.add_edge(START, "prepare")
         workflow.add_conditional_edges(
@@ -204,11 +263,15 @@ class HotelAssistantServer(A2AServer):
                 "query_hotels": "query_hotels",
                 "query_hotel_orders": "query_hotel_orders",
                 "create_hotel_order": "create_hotel_order",
+                "cancel_hotel_order": "cancel_hotel_order",
+                "change_hotel_order": "change_hotel_order",
             },
         )
         workflow.add_edge("query_hotels", END)
         workflow.add_edge("query_hotel_orders", END)
         workflow.add_edge("create_hotel_order", END)
+        workflow.add_edge("cancel_hotel_order", END)
+        workflow.add_edge("change_hotel_order", END)
         return workflow.compile()
 
     def _extract_workflow(self, conversation: str, query: str, pending_context: dict[str, Any]) -> tuple[str, dict[str, Any], list[str], str]:
@@ -260,102 +323,27 @@ class HotelAssistantServer(A2AServer):
             return "finish"
         return state["action"]
 
-    @staticmethod
-    def _fetchall(cursor, sql: str, params: tuple | list) -> list[dict]:
-        cursor.execute(sql, params)
-        return cursor.fetchall()
-
-    def resolve_hotel(self, city: str, hotel_name: str) -> tuple[dict[str, Any] | None, str]:
+    def _load_user_budget_level(self, username: str) -> str:
         conn = None
         cursor = None
         try:
             conn = get_db_connection(conf)
             cursor = conn.cursor(dictionary=True)
-
-            strategies = []
-            if city:
-                strategies.append(
-                    (
-                        "SELECT * FROM hotels WHERE city = %s AND name = %s ORDER BY id ASC",
-                        (city, hotel_name),
-                    )
-                )
-            strategies.append(
-                (
-                    "SELECT * FROM hotels WHERE name = %s ORDER BY id ASC",
-                    (hotel_name,),
-                )
-            )
-            if city:
-                strategies.append(
-                    (
-                        "SELECT * FROM hotels WHERE city = %s AND name LIKE %s ORDER BY id ASC",
-                        (city, f"%{hotel_name}%"),
-                    )
-                )
-            strategies.append(
-                (
-                    "SELECT * FROM hotels WHERE name LIKE %s ORDER BY id ASC",
-                    (f"%{hotel_name}%",),
-                )
-            )
-
-            for sql, params in strategies:
-                rows = self._fetchall(cursor, sql, params)
-                if len(rows) == 1:
-                    return rows[0], ""
-                if len(rows) > 1:
-                    options = "、".join(f"{row['city']}{row['name']}" for row in rows[:5])
-                    return None, f"匹配到多家酒店，请补充更具体的信息。当前候选有：{options}。"
-
-            return None, f"未找到匹配酒店：{hotel_name}。请确认酒店名或城市。"
-        except Exception as exc:
-            logger.error(f"酒店解析失败: {exc}")
-            return None, f"酒店解析失败：{exc}"
-        finally:
-            if cursor is not None:
-                cursor.close()
-            if conn is not None and conn.is_connected():
-                conn.close()
-
-    def resolve_room_type(self, hotel_id: int, room_type: str, check_in_date: str) -> tuple[str, str]:
-        conn = None
-        cursor = None
-        try:
-            conn = get_db_connection(conf)
-            cursor = conn.cursor(dictionary=True)
-            rows = self._fetchall(
-                cursor,
+            cursor.execute(
                 """
-                SELECT room_type
-                FROM hotel_room_inventory
-                WHERE hotel_id = %s AND stay_date = %s AND room_type = %s
-                ORDER BY id ASC
+                SELECT p.budget_level
+                FROM users u
+                LEFT JOIN user_preferences p ON p.user_id = u.id
+                WHERE u.username = %s
+                LIMIT 1
                 """,
-                (hotel_id, check_in_date, room_type),
+                (username,),
             )
-            if len(rows) == 1:
-                return rows[0]["room_type"], ""
-
-            rows = self._fetchall(
-                cursor,
-                """
-                SELECT DISTINCT room_type
-                FROM hotel_room_inventory
-                WHERE hotel_id = %s AND stay_date = %s AND room_type LIKE %s
-                ORDER BY room_type ASC
-                """,
-                (hotel_id, check_in_date, f"%{room_type}%"),
-            )
-            if len(rows) == 1:
-                return rows[0]["room_type"], ""
-            if len(rows) > 1:
-                options = "、".join(row["room_type"] for row in rows[:5])
-                return "", f"匹配到多个房型，请补充更明确的房型。当前候选有：{options}。"
-            return "", f"未找到匹配房型：{room_type}。请确认房型名称或入住日期。"
+            row = cursor.fetchone()
+            return (row or {}).get("budget_level") or "medium"
         except Exception as exc:
-            logger.error(f"房型解析失败: {exc}")
-            return "", f"房型解析失败：{exc}"
+            logger.warning(f"读取酒店排序画像失败: {exc}")
+            return "medium"
         finally:
             if cursor is not None:
                 cursor.close()
@@ -363,7 +351,15 @@ class HotelAssistantServer(A2AServer):
                 conn.close()
 
     @staticmethod
-    def build_hotel_query_sql(slots: dict[str, Any]) -> str:
+    def _sort_clause_for_budget(budget_level: str) -> str:
+        if budget_level == "low":
+            return "ORDER BY r.price_per_night ASC, r.is_refundable DESC, h.star_rating DESC"
+        if budget_level == "high":
+            return "ORDER BY h.star_rating DESC, r.breakfast_included DESC, r.price_per_night ASC"
+        return "ORDER BY r.is_refundable DESC, h.star_rating DESC, r.price_per_night ASC"
+
+    @staticmethod
+    def build_hotel_query_sql(slots: dict[str, Any], budget_level: str) -> str:
         city = str(slots.get("city", "")).replace("'", "''")
         check_in_date = str(slots.get("check_in_date", "")).replace("'", "''")
         hotel_name = str(slots.get("hotel_name", "")).replace("'", "''")
@@ -384,23 +380,8 @@ class HotelAssistantServer(A2AServer):
             "r.breakfast_included, r.is_refundable, r.price_per_night, r.remaining_rooms "
             "FROM hotels h JOIN hotel_room_inventory r ON h.id = r.hotel_id "
             f"WHERE {' AND '.join(filters)} "
-            "ORDER BY r.price_per_night ASC, h.star_rating DESC"
+            f"{HotelAssistantServer._sort_clause_for_budget(budget_level)}"
         )
-
-    async def get_hotel_info(self, sql: str) -> str:
-        try:
-            async with streamablehttp_client("http://127.0.0.1:8004/mcp") as (read, write, _):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    result = await session.call_tool("query_hotels", {"sql": sql})
-                    if isinstance(result, str):
-                        logger.info(f"酒店查询结果：{result}")
-                        return result
-                    logger.info(f"酒店查询结果：{result}")
-                    return result.content[0].text
-        except Exception as exc:
-            logger.error(f"酒店 MCP 查询出错：{exc}")
-            return json.dumps({"status": "error", "message": f"酒店 MCP 查询出错：{exc}"}, ensure_ascii=False)
 
     async def invoke_hotel_tool(self, tool_name: str, params: dict) -> dict[str, str]:
         try:
@@ -414,6 +395,12 @@ class HotelAssistantServer(A2AServer):
         except Exception as exc:
             logger.error(f"酒店工具调用失败: tool={tool_name}, error={exc}")
             return {"status": "error", "message": f"酒店工具调用失败：{exc}"}
+
+    async def get_hotel_info(self, sql: str) -> str:
+        tool_result = await self.invoke_hotel_tool("query_hotels", {"sql": sql})
+        if tool_result["status"] != "success":
+            return json.dumps({"status": "error", "message": tool_result["message"]}, ensure_ascii=False)
+        return tool_result["message"]
 
     def _query_hotel_orders_node(self, state: HotelWorkflowState) -> dict[str, Any]:
         slots = state.get("slots", {})
@@ -432,47 +419,14 @@ class HotelAssistantServer(A2AServer):
 
     def _create_hotel_order_node(self, state: HotelWorkflowState) -> dict[str, Any]:
         slots = state.get("slots", {})
-        hotel_row, hotel_error = self.resolve_hotel(
-            str(slots.get("city", "")).strip(),
-            str(slots.get("hotel_name", "")).strip(),
-        )
-        if not hotel_row:
-            return {
-                "final_text": hotel_error,
-                "final_state": "input_required",
-                "next_pending_context": build_pending_context_payload(
-                    "create_hotel_order",
-                    state["clean_query"],
-                    slots,
-                    ["hotel_name_or_city"],
-                ),
-            }
-
-        room_type, room_error = self.resolve_room_type(
-            int(hotel_row["id"]),
-            str(slots.get("room_type", "")).strip(),
-            str(slots.get("check_in_date", "")).strip(),
-        )
-        if not room_type:
-            return {
-                "final_text": room_error,
-                "final_state": "input_required",
-                "next_pending_context": build_pending_context_payload(
-                    "create_hotel_order",
-                    state["clean_query"],
-                    {**slots, "city": str(hotel_row["city"]), "hotel_name": str(hotel_row["name"])},
-                    ["room_type"],
-                ),
-            }
-
         hotel_result = asyncio.run(
             self.invoke_hotel_tool(
                 "order_hotel_room",
                 {
                     "username": state["username"],
-                    "city": str(hotel_row["city"]),
-                    "hotel_name": str(hotel_row["name"]),
-                    "room_type": room_type,
+                    "city": str(slots.get("city", "")),
+                    "hotel_name": str(slots.get("hotel_name", "")),
+                    "room_type": str(slots.get("room_type", "")),
                     "check_in_date": str(slots.get("check_in_date", "")),
                     "nights": int(slots.get("nights", 1)),
                     "rooms": int(slots.get("rooms", 1)),
@@ -481,15 +435,75 @@ class HotelAssistantServer(A2AServer):
         )
         if hotel_result["status"] != "success":
             return {"final_text": hotel_result["message"], "final_state": "failed"}
+        if "请确认" in hotel_result["message"] or "请补充" in hotel_result["message"] or "匹配到多家酒店" in hotel_result["message"]:
+            return {
+                "final_text": hotel_result["message"],
+                "final_state": "input_required",
+                "next_pending_context": build_pending_context_payload("create_hotel_order", state["clean_query"], slots, []),
+            }
+        return {"final_text": hotel_result["message"], "final_state": "completed"}
+
+    def _cancel_hotel_order_node(self, state: HotelWorkflowState) -> dict[str, Any]:
+        slots = state.get("slots", {})
+        hotel_result = asyncio.run(
+            self.invoke_hotel_tool(
+                "cancel_hotel_order",
+                {
+                    "username": state["username"],
+                    "city": str(slots.get("city", "")),
+                    "hotel_name": str(slots.get("hotel_name", "")),
+                    "room_type": str(slots.get("room_type", "")),
+                    "check_in_date": str(slots.get("check_in_date", "")),
+                },
+            )
+        )
+        if hotel_result["status"] != "success":
+            return {"final_text": hotel_result["message"], "final_state": "failed"}
+        if "请补充" in hotel_result["message"] or "匹配到多条" in hotel_result["message"]:
+            return {
+                "final_text": hotel_result["message"],
+                "final_state": "input_required",
+                "next_pending_context": build_pending_context_payload("cancel_hotel_order", state["clean_query"], slots, []),
+            }
+        return {"final_text": hotel_result["message"], "final_state": "completed"}
+
+    def _change_hotel_order_node(self, state: HotelWorkflowState) -> dict[str, Any]:
+        slots = state.get("slots", {})
+        hotel_result = asyncio.run(
+            self.invoke_hotel_tool(
+                "change_hotel_order",
+                {
+                    "username": state["username"],
+                    "current_city": str(slots.get("city", "")),
+                    "current_hotel_name": str(slots.get("hotel_name", "")),
+                    "current_room_type": str(slots.get("room_type", "")),
+                    "current_check_in_date": str(slots.get("check_in_date", "")),
+                    "new_city": str(slots.get("new_city", "")),
+                    "new_hotel_name": str(slots.get("new_hotel_name", "")),
+                    "new_room_type": str(slots.get("new_room_type", "")),
+                    "new_check_in_date": str(slots.get("new_check_in_date", "")),
+                    "new_nights": int(slots.get("new_nights", 0)),
+                },
+            )
+        )
+        if hotel_result["status"] != "success":
+            return {"final_text": hotel_result["message"], "final_state": "failed"}
+        if "请补充" in hotel_result["message"] or "匹配到多条" in hotel_result["message"] or "未找到" in hotel_result["message"]:
+            return {
+                "final_text": hotel_result["message"],
+                "final_state": "input_required",
+                "next_pending_context": build_pending_context_payload("change_hotel_order", state["clean_query"], slots, []),
+            }
         return {"final_text": hotel_result["message"], "final_state": "completed"}
 
     def _query_hotels_node(self, state: HotelWorkflowState) -> dict[str, Any]:
-        sql = self.build_hotel_query_sql(state.get("slots", {}))
+        budget_level = self._load_user_budget_level(state["username"])
+        sql = self.build_hotel_query_sql(state.get("slots", {}), budget_level)
         hotel_result = asyncio.run(self.get_hotel_info(sql))
         response = json.loads(hotel_result) if isinstance(hotel_result, str) else hotel_result
         logger.info(f"酒店 MCP 返回: {response}")
         if response.get("status") == "success":
-            lines: list[str] = []
+            lines: list[str] = [f"排序偏好：已按当前用户的预算画像（{budget_level}）做优先排序。"]
             for item in response.get("data", []):
                 breakfast = "含早" if item["breakfast_included"] else "不含早"
                 refundable = "可退" if item["is_refundable"] else "不可退"
@@ -498,18 +512,12 @@ class HotelAssistantServer(A2AServer):
                     f"{item['stay_date']} {item['room_type']} {item['bed_type']}，"
                     f"{breakfast}，{refundable}，每晚 {item['price_per_night']} 元，余房 {item['remaining_rooms']} 间"
                 )
-            response_text = "\n".join(lines) if lines else "无结果。如果需要其他日期，请补充。"
-            return {"final_text": response_text, "final_state": "completed"}
+            return {"final_text": "\n".join(lines), "final_state": "completed"}
         if response.get("status") == "no_data":
             return {
                 "final_text": response.get("message", "未找到可预订酒店。"),
                 "final_state": "input_required",
-                "next_pending_context": build_pending_context_payload(
-                    "query_hotels",
-                    state["clean_query"],
-                    state.get("slots", {}),
-                    [],
-                ),
+                "next_pending_context": build_pending_context_payload("query_hotels", state["clean_query"], state.get("slots", {}), []),
             }
         return {"final_text": response.get("message", "酒店查询失败，请重试。"), "final_state": "failed"}
 

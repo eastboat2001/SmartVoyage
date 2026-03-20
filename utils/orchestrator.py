@@ -155,6 +155,16 @@ class SmartVoyageOrchestrator:
         keywords = ("我的", "订单", "已订", "已预订", "我订了", "查询")
         return "酒店" in text and any(keyword in text for keyword in keywords)
 
+    @staticmethod
+    def _looks_like_hotel_cancel_or_change(text: str) -> bool:
+        hotel_keywords = ("酒店", "房型", "入住")
+        cancel_keywords = ("取消", "退掉", "退订")
+        change_keywords = ("改期", "改到", "改成", "改一下", "换房型", "换到")
+        return any(keyword in text for keyword in hotel_keywords) and (
+            any(keyword in text for keyword in cancel_keywords)
+            or any(keyword in text for keyword in change_keywords)
+        )
+
     def _normalize_intent_result(
         self,
         user_input: str,
@@ -172,6 +182,20 @@ class SmartVoyageOrchestrator:
                 normalized_intents = [intent for intent in normalized_intents if intent != "hotel"]
                 normalized_queries.pop("hotel", None)
                 normalized_queries["my_orders"] = base_query if "酒店" in base_query else user_input
+
+        if "cancel_order" in normalized_intents and self._looks_like_hotel_cancel_or_change(user_input):
+            cancel_query = normalized_queries.pop("cancel_order", user_input)
+            normalized_intents = [intent for intent in normalized_intents if intent != "cancel_order"]
+            if "hotel" not in normalized_intents:
+                normalized_intents.append("hotel")
+            normalized_queries["hotel"] = cancel_query
+
+        if "change_order" in normalized_intents and self._looks_like_hotel_cancel_or_change(user_input):
+            change_query = normalized_queries.pop("change_order", user_input)
+            normalized_intents = [intent for intent in normalized_intents if intent != "change_order"]
+            if "hotel" not in normalized_intents:
+                normalized_intents.append("hotel")
+            normalized_queries["hotel"] = change_query
 
         return normalized_intents, normalized_queries, follow_up_message
 
@@ -550,7 +574,7 @@ class SmartVoyageOrchestrator:
         return intents, user_queries, follow_up_message, {}
 
     def _with_user_context(self, intent: str, query: str) -> str:
-        if intent not in {"order", "my_orders", "cancel_order", "change_order"}:
+        if intent not in {"order", "my_orders", "cancel_order", "change_order", "hotel"}:
             return query
         if "当前用户" in query:
             return query

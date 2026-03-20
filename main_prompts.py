@@ -9,9 +9,9 @@ class SmartVoyagePrompts:
         return ChatPromptTemplate.from_template(
 """
 系统提示：您是一个专业的旅行意图识别专家，基于用户查询和对话历史，识别其意图，用于调用专门的agent server来执行；为方便后续的agent server处理，可以基于对话历史对用户查询进行改写，使问题更明确。严格遵守规则：
-- 支持意图：['weather' (天气查询), 'flight' (机票查询), 'train' (高铁/火车票查询), 'hotel' (酒店查询/酒店预订), 'order' (交通票务预定), 'my_orders' (查询我的订单，包含交通票和酒店订单), 'cancel_order' (退票), 'change_order' (改签/改票), 'travel_plan' (基于天气/行程综合推荐出行方式并继续查票或订票), 'attraction' (景点推荐)] 或其组合（如 ['weather', 'flight']）。如果意图超出范围，返回意图 'out_of_scope'。
-- 注意票务预定、票务查询、订单查询、退票、改签要区分开，涉及到下单时则为order，只是查询交通票则为flight/train，查询“我的订单/我订了哪些票/我的酒店订单/我的机票和酒店/我的火车票和酒店”这类已预订订单时统一为my_orders，涉及“退掉/取消订单”时则为cancel_order，涉及“改签到/改票/改签”时则为change_order。
-- 只有“查酒店库存/订酒店/推荐酒店/住哪里”这类酒店查询或预订请求，才识别为 hotel；不要把“我的酒店订单”“查询我的酒店”“查询我的机票和酒店”这类订单查询识别成 hotel。
+- 支持意图：['weather' (天气查询), 'flight' (机票查询), 'train' (高铁/火车票查询), 'hotel' (酒店查询/酒店预订/酒店取消/酒店改期), 'order' (交通票务预定), 'my_orders' (查询我的订单，包含交通票和酒店订单), 'cancel_order' (退票), 'change_order' (改签/改票), 'travel_plan' (基于天气/行程综合推荐出行方式并继续查票或订票), 'attraction' (景点推荐)] 或其组合（如 ['weather', 'flight']）。如果意图超出范围，返回意图 'out_of_scope'。
+- 注意票务预定、票务查询、订单查询、退票、改签要区分开，涉及到下单时则为order，只是查询交通票则为flight/train，查询“我的订单/我订了哪些票/我的酒店订单/我的机票和酒店/我的火车票和酒店”这类已预订订单时统一为my_orders；只有明确是交通票务退票时才识别为cancel_order，只有明确是交通票务改签/改票时才识别为change_order。
+- 只有“查酒店库存/订酒店/推荐酒店/住哪里/取消酒店/退掉酒店/取消我订的某酒店/酒店改期/把酒店改到某天/改酒店房型”这类酒店查询、预订或酒店订单生命周期请求，才识别为 hotel；不要把“我的酒店订单”“查询我的酒店”“查询我的机票和酒店”这类订单查询识别成 hotel。
 - 如果用户明确表达“根据天气推荐坐高铁还是飞机、再帮我查票/订票”这类跨 Agent 协作需求，优先识别为 travel_plan。识别为 travel_plan 时：
   1. user_queries['travel_plan'] 写整合后的规划请求；
   2. 如果需要先查天气，再额外补充 user_queries['weather']，供天气 agent 使用；
@@ -32,6 +32,8 @@ class SmartVoyagePrompts:
 {{"intents": ["change_order"], "user_queries": {{"change_order": "把我2026-03-21北京到上海的高铁票改签到2026-03-22二等座"}}, "follow_up_message": ""}}
 {{"intents": ["travel_plan"], "user_queries": {{"travel_plan": "根据杭州明天的天气，帮我判断从北京去杭州更适合坐高铁还是飞机，并查询对应票务", "weather": "查询杭州明天的天气"}}, "follow_up_message": ""}}
 {{"intents": ["hotel"], "user_queries": {{"hotel": "查询2026-03-21上海的酒店"}}, "follow_up_message": ""}}
+{{"intents": ["hotel"], "user_queries": {{"hotel": "取消我订的2026-03-21上海外滩云际酒店"}}, "follow_up_message": ""}}
+{{"intents": ["hotel"], "user_queries": {{"hotel": "把我2026-03-21上海外滩云际酒店改到2026-03-22"}}, "follow_up_message": ""}}
 {{"intents": ["out_of_scope"], "user_queries": {{}}, "follow_up_message": "你好，我是智能旅行助手，欢迎您向我提问"}}
 
 当前日期：{current_date} (Asia/Shanghai)。
@@ -180,7 +182,7 @@ class SmartVoyagePrompts:
 系统提示：你是 SmartVoyage 的酒店域状态抽取器。你的任务是只基于当前用户输入、最近对话和待补上下文，统一决定酒店域 action，并抽取 slots，供 LangGraph 后端做强校验和工具调用。
 
 规则：
-- 只允许输出以下 action 之一：query_hotels / query_hotel_orders / create_hotel_order。
+- 只允许输出以下 action 之一：query_hotels / query_hotel_orders / create_hotel_order / cancel_hotel_order / change_hotel_order。
 - 这是酒店域内部统一 state 的唯一语义入口，不要依赖关键词规则二次判断。
 - 只抽取用户明确表达的信息；不能根据常识补全城市、酒店名、房型、日期。
 - 酒店名里可能本身包含地名，例如“上海XX酒店”；不要因为酒店名里有地名，就把它拆成城市。
@@ -190,6 +192,12 @@ class SmartVoyagePrompts:
 - query_hotels 的最小进入后端条件：city + check_in_date。
 - create_hotel_order 的最小进入后端条件：hotel_name + room_type + check_in_date；city 不是强制必填，因为后端可尝试唯一匹配。
 - query_hotel_orders 一般可直接 `is_complete=true`；若用户明确给了入住日期，可填入 check_in_date 作为过滤条件。
+- cancel_hotel_order 的最小进入后端条件：至少要能定位到当前已预订酒店订单，例如 `hotel_name + check_in_date`，或 `city + check_in_date + room_type`。
+- change_hotel_order 需要区分当前订单字段与新目标字段：
+  - 当前订单字段：city / hotel_name / room_type / check_in_date / nights
+  - 新目标字段：new_city / new_hotel_name / new_room_type / new_check_in_date / new_nights
+- change_hotel_order 在已有当前订单定位条件时，至少还要有一个 `new_*` 字段，才能 `is_complete=true`。
+- 如果用户只说“把酒店改一下”“取消我订的酒店”，必须保持未明确字段为空，并通过 `missing_slots` + `follow_up_message` 追问。
 - 当 `is_complete=false` 时，必须给出简洁明确的中文追问，并列出 `missing_slots`。
 - 不要输出 markdown，不要补充结构化字段以外的解释。
 

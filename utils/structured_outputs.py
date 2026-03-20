@@ -18,7 +18,13 @@ SupportedIntent = Literal[
 ]
 
 OrderAction = Literal["create_order", "query_orders", "cancel_order", "change_order"]
-HotelAction = Literal["query_hotels", "query_hotel_orders", "create_hotel_order"]
+HotelAction = Literal[
+    "query_hotels",
+    "query_hotel_orders",
+    "create_hotel_order",
+    "cancel_hotel_order",
+    "change_hotel_order",
+]
 
 
 class IntentRecognitionResult(BaseModel):
@@ -131,6 +137,11 @@ class HotelWorkflowExtractionResult(BaseModel):
     check_in_date: str = ""
     nights: int = 1
     rooms: int = 1
+    new_city: str = ""
+    new_hotel_name: str = ""
+    new_room_type: str = ""
+    new_check_in_date: str = ""
+    new_nights: int = 0
     missing_slots: list[str] = Field(default_factory=list)
     follow_up_message: str = ""
     is_complete: bool = False
@@ -141,10 +152,24 @@ class HotelWorkflowExtractionResult(BaseModel):
             self.nights = 1
         if self.rooms <= 0:
             self.rooms = 1
+        if self.new_nights < 0:
+            self.new_nights = 0
         if self.is_complete and self.missing_slots:
             raise ValueError("complete extraction should not contain missing_slots")
         if not self.is_complete and not self.follow_up_message.strip():
             raise ValueError("incomplete extraction requires follow_up_message")
+        if self.action == "change_hotel_order" and self.is_complete:
+            has_new_target = any(
+                [
+                    self.new_city.strip(),
+                    self.new_hotel_name.strip(),
+                    self.new_room_type.strip(),
+                    self.new_check_in_date.strip(),
+                    self.new_nights > 0,
+                ]
+            )
+            if not has_new_target:
+                raise ValueError("change_hotel_order requires at least one new target field when complete")
         return self
 
 

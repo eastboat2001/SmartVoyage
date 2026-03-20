@@ -43,7 +43,9 @@ SmartVoyage 是一个基于 A2A + MCP + LangGraph 的旅行助手示例项目，
   - 已新增酒店基础数据与房型库存
   - 已支持酒店查询
   - 已支持酒店预订
+  - 已支持酒店取消 / 改期
   - 已支持查询酒店订单 / 在统一订单视图中展示酒店订单
+  - 已支持按用户画像中的预算偏好对酒店结果做排序
   - 订单域 / 酒店域已统一到 `LangGraph state + LLM 结构化抽取 slots + 后端强校验 + pending_context 多轮补参 + MCP/tool 执行`
 - 当前支持两种模型提供方式：
   - `openai_compatible`
@@ -100,7 +102,7 @@ SmartVoyage 是一个基于 A2A + MCP + LangGraph 的旅行助手示例项目，
   - 基于 LangGraph 编排“查单 / 下单 / 退票 / 改签”流程。
 - `a2a_server/hotel_server.py`
   - 酒店 Agent。
-  - 负责酒店查询、酒店预订与酒店订单查询。
+  - 负责酒店查询、酒店预订、酒店取消/改期与酒店订单查询。
 
 ### `mcp_server/`
 
@@ -117,7 +119,7 @@ SmartVoyage 是一个基于 A2A + MCP + LangGraph 的旅行助手示例项目，
   - 提供火车票、机票预定与用户订单查询工具。
 - `mcp_server/mcp_hotel_server.py`
   - 酒店 MCP 服务。
-  - 提供酒店查询、酒店预订与酒店订单查询工具。
+  - 提供酒店查询、酒店预订、酒店取消/改期与酒店订单查询工具。
 
 ### `sql/`
 
@@ -138,6 +140,7 @@ SmartVoyage 是一个基于 A2A + MCP + LangGraph 的旅行助手示例项目，
   - 交通票务预定
   - 酒店查询
   - 酒店预订
+  - 酒店取消 / 改期
   - 订单落库
   - 查询我的当前已预订订单
   - 查询我的酒店订单
@@ -151,7 +154,6 @@ SmartVoyage 是一个基于 A2A + MCP + LangGraph 的旅行助手示例项目，
   - 出发地缺失时，基于 `home_city` 的确认性追问
 - 当前尚未支持：
   - 登录/切换用户
-  - 酒店取消 / 改期
   - 酒店深度接入 `travel_plan`
   - 模糊改签（如“改签到下午”）
   - 完整持久化的用户画像采集与维护流程
@@ -514,6 +516,8 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
 把我2026-03-21北京到上海的高铁票改签到2026-03-22二等座
 查询2026-03-21上海的酒店
 帮我订2026-03-21上海外滩云际酒店的高级大床房，住2晚1间
+取消我订的2026-03-21上海外滩云际酒店
+把我2026-03-21上海外滩云际酒店改到2026-03-22
 ```
 
 说明：
@@ -627,8 +631,10 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
   - `prepare -> query_orders | cancel_order | change_order | lookup_tickets -> create_order`
   - `prepare` 节点统一由 LLM 产出 action 与 slots，再由后端计算缺失字段、生成追问和执行 payload
 - 酒店域 LangGraph 流程
-  - `prepare -> query_hotels | query_hotel_orders | create_hotel_order`
+  - `prepare -> query_hotels | query_hotel_orders | create_hotel_order | cancel_hotel_order | change_hotel_order`
   - 酒店查询已从“再生成 SQL 的二次 LLM 判断”改为“先抽 slots，再由后端确定性拼 SQL 并调 MCP”
+  - 酒店取消 / 改期已支持库存回补、目标库存扣减和订单状态流转
+  - 酒店查询会读取当前用户画像中的 `budget_level`，按预算偏好调整排序
 - 多轮补参统一机制
   - 子域返回 `input_required + pending_context`
   - 前端 / CLI 在当前会话内保存 `pending_context`
@@ -717,7 +723,7 @@ ollama pull 你的模型名
 - 当前订单域与酒店域已经统一到一套会话 state schema，但 pending_context 仍只保存在当前前端 / CLI 会话内。
 - 当前订单查询虽然已支持“飞机票 + 酒店 + 火车票”这类多类型组合过滤，但这部分类型组合仍主要靠后端规则做确定性收敛，不是完整的通用多标签 schema。
 - 当前酒店库存是按示例日期初始化的离散库存，不是完整 CRS / PMS 模型。
-- 当前酒店预订已支持查询、预订、查订单，但还没有取消、改期和多酒店联动编排。
+- 当前酒店订单生命周期已支持查询、预订、取消、改期，但还没有多酒店联动编排。
 - 当前 `pending_context` 补参仅在当前会话内生效，不做跨进程、跨重启持久化。
 - 当前改签优先支持显式条件；对模糊时间表达（如“下午”“晚上”）会优先追问，不做自由脑补。
 
