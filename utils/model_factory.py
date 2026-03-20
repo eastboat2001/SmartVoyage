@@ -20,6 +20,13 @@ ORDER_AGENT_SYSTEM_PROMPT = (
     "不能自己编撰参数。"
 )
 
+HOTEL_AGENT_SYSTEM_PROMPT = (
+    "你是一个酒店助手，能够调用工具完成酒店查询、酒店预订和酒店订单查询。"
+    "你需要优先基于工具返回的真实数据回答，不能编造酒店、房型、价格、库存或日期。"
+    "如果用户要预订酒店，必须收集到入住城市、酒店名、房型、入住日期、入住晚数和房间数。"
+    "如果信息不足，请明确追问。"
+)
+
 
 def build_chat_model(
     config: Config,
@@ -64,6 +71,14 @@ def build_order_agent(model: BaseChatModel, tools: list[Any]):
         model=model,
         tools=tools,
         system_prompt=ORDER_AGENT_SYSTEM_PROMPT,
+    )
+
+
+def build_hotel_agent(model: BaseChatModel, tools: list[Any]):
+    return create_agent(
+        model=model,
+        tools=tools,
+        system_prompt=HOTEL_AGENT_SYSTEM_PROMPT,
     )
 
 

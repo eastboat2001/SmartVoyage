@@ -1,7 +1,7 @@
 """
 order_server.py：
     订单代理服务器，负责交通票务下单、查询我的订单、退票与改签。
-    下单时先调用票务查询 Agent 获取余票，再调用订单 MCP 完成订票和落库。
+    统一采用 LangGraph state + LLM 结构化抽取 slots + 后端强校验 + pending_context 多轮补参。
 """
 import asyncio
 import json
@@ -13,36 +13,47 @@ from datetime import datetime
 from typing import Any
 from typing_extensions import Literal, TypedDict
 
+import pytz
 from langgraph.graph import END, START, StateGraph
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
-from langchain_mcp_adapters.tools import load_mcp_tools
 from python_a2a import (
+    A2AClient,
+    A2AServer,
     AgentCard,
     AgentSkill,
-    run_server,
-    TaskStatus,
-    TaskState,
-    A2AServer,
-    A2AClient,
     Message,
-    TextContent,
     MessageRole,
     Task,
+    TaskState,
+    TaskStatus,
+    TextContent,
+    run_server,
 )
-import pytz
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from create_logger import logger
 from config import Config
+from create_logger import logger
 from main_prompts import SmartVoyagePrompts
-from utils.model_factory import build_order_agent, extract_text_from_agent_result
 from utils.resilient_llm import ResilientModelInvoker
-from utils.structured_outputs import OrderOperationExtractionResult
+from utils.structured_outputs import OrderWorkflowExtractionResult, PendingContextPayload
 
 conf = Config()
 model_invoker = ResilientModelInvoker(conf)
+
+PENDING_CONTEXT_PATTERN = re.compile(
+    r"\[PENDING_CONTEXT\](?P<payload>.*?)\[/PENDING_CONTEXT\]",
+    re.DOTALL,
+)
+TRAIN_TICKET_PATTERN = re.compile(
+    r"(?P<departure>\S+)\s+到\s+(?P<arrival>\S+)\s+(?P<departure_time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}): "
+    r"车次\s+(?P<transport_no>\S+)，(?P<ticket_type>[^，]+)，票价\s+(?P<price>[\d.]+)元，剩余\s+(?P<remaining>\d+)\s+张"
+)
+FLIGHT_TICKET_PATTERN = re.compile(
+    r"(?P<departure>\S+)\s+到\s+(?P<arrival>\S+)\s+(?P<departure_time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}): "
+    r"航班\s+(?P<transport_no>\S+)，(?P<ticket_type>[^，]+)，票价\s+(?P<price>[\d.]+)元，剩余\s+(?P<remaining>\d+)\s+张"
+)
 
 
 class OrderWorkflowState(TypedDict, total=False):
@@ -50,27 +61,17 @@ class OrderWorkflowState(TypedDict, total=False):
     latest_query: str
     clean_query: str
     username: str
+    domain: Literal["order"]
     action: Literal["query_orders", "cancel_order", "change_order", "create_order"]
+    slots: dict[str, Any]
+    missing_slots: list[str]
     pending_context: dict[str, Any]
-    operation_payload: dict[str, str]
-    missing_fields: list[str]
-    pending_order_context: dict[str, Any]
+    execution_payload: dict[str, Any]
     ticket_result_text: str
     ticket_task_state: str
     final_text: str
     final_state: Literal["completed", "failed", "input_required"]
-
-
-def extract_username(conversation: str) -> str:
-    matches = re.findall(r"当前用户[:：]\s*([^\s，。,\.]+)", conversation)
-    if matches:
-        return matches[-1].strip()
-    return conf.default_username
-
-
-def extract_departure_date(conversation: str) -> str:
-    match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", conversation)
-    return match.group(1) if match else ""
+    next_pending_context: dict[str, Any]
 
 
 def latest_user_request(conversation: str) -> str:
@@ -82,35 +83,11 @@ def latest_user_request(conversation: str) -> str:
     return conversation.strip()
 
 
-def is_order_query(conversation: str) -> bool:
-    keywords = (
-        "我的订单",
-        "查询订单",
-        "查询我的订单",
-        "查看订单",
-        "看看我订",
-        "我订了哪些",
-        "已订",
-        "已预订",
-    )
-    latest_query = latest_user_request(conversation)
-    return any(keyword in latest_query for keyword in keywords)
-
-
-def is_cancel_query(conversation: str) -> bool:
-    latest_query = latest_user_request(conversation)
-    return any(keyword in latest_query for keyword in ("退票", "退掉", "取消订单", "取消这张票", "取消机票", "取消高铁票"))
-
-
-def is_change_query(conversation: str) -> bool:
-    latest_query = latest_user_request(conversation)
-    return any(keyword in latest_query for keyword in ("改签", "改票", "改签到", "改成"))
-
-
-PENDING_CONTEXT_PATTERN = re.compile(
-    r"\[PENDING_ORDER_CONTEXT\](?P<payload>.*?)\[/PENDING_ORDER_CONTEXT\]",
-    re.DOTALL,
-)
+def extract_username(conversation: str) -> str:
+    matches = re.findall(r"当前用户[:：]\s*([^\s，。,\.]+)", conversation)
+    if matches:
+        return matches[-1].strip()
+    return conf.default_username
 
 
 def extract_pending_context(query: str) -> dict[str, Any]:
@@ -133,122 +110,196 @@ def summarize_conversation(conversation: str, limit: int = 8) -> str:
     return "\n".join(lines[-limit:])
 
 
-def determine_action(query: str, pending_context: dict[str, Any]) -> Literal["query_orders", "cancel_order", "change_order", "create_order"]:
-    pending_action = pending_context.get("action", "")
-    if pending_action in {"cancel_order", "change_order"}:
-        return pending_action
-    if is_order_query(query):
-        return "query_orders"
-    if is_cancel_query(query):
-        return "cancel_order"
-    if is_change_query(query):
-        return "change_order"
-    return "create_order"
-
-
-def normalize_missing_fields(action: str, result: OrderOperationExtractionResult) -> list[str]:
-    missing = {field.strip() for field in result.missing_fields if field.strip()}
-    if not result.order_type:
-        missing.add("order_type")
-    has_current_selector = bool(
-        result.current_transport_no
-        or (
-            result.current_departure_date
-            and result.departure_city
-            and result.arrival_city
-        )
-    )
-    if not has_current_selector:
-        missing.add("current_order_selector")
-    if action == "change_order" and not (
-        result.new_departure_date
-        or result.new_transport_no
-        or result.new_ticket_type
-    ):
-        missing.add("new_target")
-    return sorted(missing)
-
-
-def default_follow_up_message(action: str, missing_fields: list[str]) -> str:
-    if action == "cancel_order":
-        if "order_type" in missing_fields and "current_order_selector" in missing_fields:
-            return "请补充要退的是高铁票还是机票，以及至少一组订单条件，例如车次/航班号，或日期加出发到达城市。"
-        if "order_type" in missing_fields:
-            return "请补充要退的是高铁票还是机票。"
-        return "请补充更具体的订单信息，例如车次/航班号，或日期加出发到达城市。"
-
-    messages: list[str] = []
-    if "order_type" in missing_fields:
-        messages.append("高铁票还是机票")
-    if "current_order_selector" in missing_fields:
-        messages.append("当前订单的车次/航班号，或日期加路线")
-    if "new_target" in missing_fields:
-        messages.append("新的日期、车次/航班号或席位/舱位")
-    joined = "、".join(messages) if messages else "改签信息"
-    return f"请补充{joined}，我再继续帮你改签。"
-
-
-def build_pending_order_context(
-    *,
-    action: str,
-    query: str,
-    extraction: OrderOperationExtractionResult,
-    missing_fields: list[str],
-) -> dict[str, Any]:
-    extracted_fields = {
-        key: value
-        for key, value in {
-            "order_type": extraction.order_type,
-            "current_departure_date": extraction.current_departure_date,
-            "departure_city": extraction.departure_city,
-            "arrival_city": extraction.arrival_city,
-            "current_transport_no": extraction.current_transport_no,
-            "current_ticket_type": extraction.current_ticket_type,
-            "new_departure_date": extraction.new_departure_date,
-            "new_transport_no": extraction.new_transport_no,
-            "new_ticket_type": extraction.new_ticket_type,
-        }.items()
-        if value
-    }
-    return {
-        "action": action,
-        "original_query": query,
-        "missing_fields": missing_fields,
-        "extracted_fields": extracted_fields,
-    }
-
-
 def pending_context_summary(pending_context: dict[str, Any]) -> str:
     if not pending_context:
         return "无"
     return json.dumps(pending_context, ensure_ascii=False)
 
 
-async def run_order_agent(query: str):
-    try:
-        async with streamablehttp_client("http://127.0.0.1:8003/mcp") as (read, write, _):
-            async with ClientSession(read, write) as session:
-                try:
-                    await session.initialize()
-                    tools = await load_mcp_tools(session)
-                    response = await model_invoker.ainvoke_agent(
-                        lambda model: build_order_agent(model, tools),
-                        {"messages": [{"role": "user", "content": query}]},
-                        description="订单 Agent 执行",
-                    )
-                    return {
-                        "status": "success",
-                        "message": extract_text_from_agent_result(response),
-                    }
-                except Exception as e:
-                    logger.error(f"订单 MCP 调用出错：{str(e)}")
-                    return {"status": "error", "message": f"订单 MCP 调用出错：{str(e)}"}
-    except Exception as e:
-        logger.error(f"连接或会话初始化时发生错误: {e}")
-        return {"status": "error", "message": "连接或会话初始化时发生错误"}
+def merge_order_slots(extraction: OrderWorkflowExtractionResult, pending_context: dict[str, Any]) -> dict[str, Any]:
+    pending_slots = pending_context.get("slots", {}) if isinstance(pending_context, dict) else {}
+    merged: dict[str, Any] = dict(pending_slots) if isinstance(pending_slots, dict) else {}
+    explicit_slots = {
+        "query_order_type": extraction.query_order_type,
+        "order_type": extraction.order_type,
+        "departure_date": extraction.departure_date,
+        "departure_city": extraction.departure_city,
+        "arrival_city": extraction.arrival_city,
+        "transport_no": extraction.transport_no,
+        "ticket_type": extraction.ticket_type,
+        "quantity": extraction.quantity,
+        "new_departure_date": extraction.new_departure_date,
+        "new_transport_no": extraction.new_transport_no,
+        "new_ticket_type": extraction.new_ticket_type,
+    }
+    for key, value in explicit_slots.items():
+        if isinstance(value, str):
+            if value.strip():
+                merged[key] = value.strip()
+        elif value is not None:
+            merged[key] = value
+    if "quantity" not in merged or int(merged.get("quantity", 1)) <= 0:
+        merged["quantity"] = 1
+    return merged
 
 
-async def query_my_orders(username: str, departure_date: str):
+def normalize_query_order_type(query: str, query_order_type: str) -> str:
+    normalized_query = query.strip()
+    explicit_transport_keywords = ("交通订单", "交通票订单", "交通票", "车票订单")
+    explicit_train_keywords = ("高铁订单", "高铁票订单", "火车订单", "火车票订单", "高铁票", "火车票")
+    explicit_flight_keywords = ("机票订单", "航班订单", "飞机票订单", "机票", "航班", "飞机票")
+    explicit_hotel_keywords = ("酒店订单", "我的酒店", "酒店")
+
+    if query_order_type == "transport" and any(keyword in normalized_query for keyword in explicit_transport_keywords):
+        return "transport"
+    if query_order_type == "train" and any(keyword in normalized_query for keyword in explicit_train_keywords):
+        return "train"
+    if query_order_type == "flight" and any(keyword in normalized_query for keyword in explicit_flight_keywords):
+        return "flight"
+    if query_order_type == "hotel" and any(keyword in normalized_query for keyword in explicit_hotel_keywords):
+        return "hotel"
+    return ""
+
+
+def extract_query_order_types(query: str) -> list[str]:
+    normalized_query = query.strip()
+    detected: list[str] = []
+
+    if any(keyword in normalized_query for keyword in ("交通订单", "交通票订单", "交通票", "车票订单")):
+        return ["train", "flight"]
+
+    if any(keyword in normalized_query for keyword in ("高铁订单", "高铁票订单", "火车订单", "火车票订单", "高铁票", "火车票")):
+        detected.append("train")
+    if any(keyword in normalized_query for keyword in ("机票订单", "航班订单", "飞机票订单", "机票", "航班", "飞机票")):
+        detected.append("flight")
+    if any(keyword in normalized_query for keyword in ("酒店订单", "我的酒店", "酒店")):
+        detected.append("hotel")
+
+    deduplicated: list[str] = []
+    for item in detected:
+        if item not in deduplicated:
+            deduplicated.append(item)
+    return deduplicated
+
+
+def normalize_missing_slots(action: str, slots: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    if action == "create_order":
+        for field in ("order_type", "departure_date", "departure_city", "arrival_city"):
+            if not str(slots.get(field, "")).strip():
+                missing.append(field)
+        return missing
+
+    if action == "query_orders":
+        return missing
+
+    if not str(slots.get("order_type", "")).strip():
+        missing.append("order_type")
+
+    has_selector = bool(
+        str(slots.get("transport_no", "")).strip()
+        or (
+            str(slots.get("departure_date", "")).strip()
+            and str(slots.get("departure_city", "")).strip()
+            and str(slots.get("arrival_city", "")).strip()
+        )
+    )
+    if not has_selector:
+        missing.append("current_order_selector")
+
+    if action == "change_order":
+        has_new_target = any(
+            str(slots.get(field, "")).strip()
+            for field in ("new_departure_date", "new_transport_no", "new_ticket_type")
+        )
+        if not has_new_target:
+            missing.append("new_target")
+    return missing
+
+
+def default_follow_up_message(action: str, missing_slots: list[str]) -> str:
+    if action == "create_order":
+        messages = {
+            "order_type": "高铁票还是机票",
+            "departure_date": "出发日期",
+            "departure_city": "出发城市",
+            "arrival_city": "到达城市",
+        }
+        joined = "、".join(messages[item] for item in missing_slots if item in messages) or "订票信息"
+        return f"请补充{joined}，我再继续帮你下单。"
+
+    if action == "cancel_order":
+        if "order_type" in missing_slots and "current_order_selector" in missing_slots:
+            return "请补充要退的是高铁票还是机票，以及至少一组订单条件，例如车次/航班号，或日期加出发到达城市。"
+        if "order_type" in missing_slots:
+            return "请补充要退的是高铁票还是机票。"
+        return "请补充更具体的订单信息，例如车次/航班号，或日期加出发到达城市。"
+
+    if action == "change_order":
+        messages: list[str] = []
+        if "order_type" in missing_slots:
+            messages.append("高铁票还是机票")
+        if "current_order_selector" in missing_slots:
+            messages.append("当前订单的车次/航班号，或日期加路线")
+        if "new_target" in missing_slots:
+            messages.append("新的日期、车次/航班号或席位/舱位")
+        joined = "、".join(messages) if messages else "改签信息"
+        return f"请补充{joined}，我再继续帮你改签。"
+
+    return "请补充更具体的订单信息。"
+
+
+def build_pending_context_payload(action: str, query: str, slots: dict[str, Any], missing_slots: list[str]) -> dict[str, Any]:
+    payload = PendingContextPayload(
+        domain="order",
+        action=action,
+        missing_slots=missing_slots,
+        slots={key: value for key, value in slots.items() if value not in ("", None)},
+        original_query=query,
+    )
+    return payload.model_dump()
+
+
+def parse_ticket_candidates(raw_text: str) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for line in raw_text.splitlines():
+        normalized = line.strip()
+        if not normalized:
+            continue
+        train_match = TRAIN_TICKET_PATTERN.search(normalized)
+        flight_match = FLIGHT_TICKET_PATTERN.search(normalized)
+        match = train_match or flight_match
+        if not match:
+            continue
+        candidate = match.groupdict()
+        candidate["order_type"] = "train" if train_match else "flight"
+        candidates.append(candidate)
+    return candidates
+
+
+def select_ticket_candidate(candidates: list[dict[str, Any]], slots: dict[str, Any]) -> dict[str, Any] | None:
+    selected = candidates
+    for field in ("order_type", "transport_no", "ticket_type", "departure_city", "arrival_city"):
+        expected = str(slots.get(field, "")).strip()
+        if expected:
+            field_name = "departure" if field == "departure_city" else "arrival" if field == "arrival_city" else field
+            filtered = [item for item in selected if str(item.get(field_name, "")).strip() == expected]
+            if filtered:
+                selected = filtered
+    departure_date = str(slots.get("departure_date", "")).strip()
+    if departure_date:
+        filtered = [item for item in selected if str(item.get("departure_time", "")).startswith(departure_date)]
+        if filtered:
+            selected = filtered
+    return selected[0] if selected else None
+
+
+async def query_my_orders_with_filter(
+    username: str,
+    departure_date: str,
+    order_type: str = "",
+    order_types: list[str] | None = None,
+) -> str:
     try:
         async with streamablehttp_client("http://127.0.0.1:8003/mcp") as (read, write, _):
             async with ClientSession(read, write) as session:
@@ -256,6 +307,10 @@ async def query_my_orders(username: str, departure_date: str):
                 params = {"username": username}
                 if departure_date:
                     params["departure_date"] = departure_date
+                if order_type:
+                    params["order_type"] = order_type
+                if order_types:
+                    params["order_types"] = ",".join(order_types)
                 result = await session.call_tool("query_user_orders", params)
                 if isinstance(result, str):
                     return result
@@ -281,9 +336,9 @@ async def invoke_order_tool(tool_name: str, params: dict[str, Any]) -> str:
 
 agent_card = AgentCard(
     name="TicketOrderAssistant",
-    description="通过MCP提供交通票务预定、订单查询、退票与改签服务的助手",
+    description="通过 MCP 提供交通票务预定、订单查询、退票与改签服务的助手",
     url="http://localhost:5007",
-    version="1.1.0",
+    version="1.2.0",
     capabilities={"streaming": True, "memory": True},
     skills=[
         AgentSkill(
@@ -341,65 +396,27 @@ class TicketOrderServer(A2AServer):
         workflow.add_edge("create_order", END)
         return workflow.compile()
 
-    def _extract_operation_payload(
-        self,
-        *,
-        action: Literal["cancel_order", "change_order"],
-        conversation: str,
-        query: str,
-        pending_context: dict[str, Any],
-    ) -> tuple[dict[str, str], list[str], str, dict[str, Any] | None]:
+    def _extract_workflow(self, conversation: str, query: str, pending_context: dict[str, Any]) -> tuple[str, dict[str, Any], list[str], str]:
         current_date = datetime.now(pytz.timezone("Asia/Shanghai")).strftime("%Y-%m-%d")
         extraction = model_invoker.invoke_structured(
-            SmartVoyagePrompts.order_operation_extraction_prompt(),
-            OrderOperationExtractionResult,
+            SmartVoyagePrompts.order_workflow_extraction_prompt(),
+            OrderWorkflowExtractionResult,
             {
                 "conversation_history": summarize_conversation(conversation),
                 "query": query,
-                "action": action,
                 "current_date": current_date,
                 "pending_context": pending_context_summary(pending_context),
             },
-            description=f"订单操作参数抽取:{action}",
+            description="订单域状态抽取",
         )
-        logger.info(f"订单参数抽取结果: {extraction.model_dump()}")
-
-        missing_fields = normalize_missing_fields(action, extraction)
-        follow_up_message = extraction.follow_up_message.strip() or default_follow_up_message(action, missing_fields)
-        if missing_fields:
-            pending = build_pending_order_context(
-                action=action,
-                query=query,
-                extraction=extraction,
-                missing_fields=missing_fields,
-            )
-            return {}, missing_fields, follow_up_message, pending
-
-        payload = {
-            "order_type": extraction.order_type,
-            "departure_city": extraction.departure_city,
-            "arrival_city": extraction.arrival_city,
-        }
-        if action == "cancel_order":
-            payload.update(
-                {
-                    "departure_date": extraction.current_departure_date,
-                    "transport_no": extraction.current_transport_no,
-                    "ticket_type": extraction.current_ticket_type,
-                }
-            )
-        else:
-            payload.update(
-                {
-                    "current_departure_date": extraction.current_departure_date,
-                    "current_transport_no": extraction.current_transport_no,
-                    "current_ticket_type": extraction.current_ticket_type,
-                    "new_departure_date": extraction.new_departure_date,
-                    "new_transport_no": extraction.new_transport_no,
-                    "new_ticket_type": extraction.new_ticket_type,
-                }
-            )
-        return payload, [], "", None
+        logger.info(f"订单域状态抽取结果: {extraction.model_dump()}")
+        slots = merge_order_slots(extraction, pending_context)
+        action = pending_context.get("action", extraction.action) if pending_context.get("domain") == "order" else extraction.action
+        if action == "query_orders":
+            slots["query_order_type"] = normalize_query_order_type(query, str(slots.get("query_order_type", "")))
+        missing_slots = normalize_missing_slots(action, slots)
+        follow_up_message = extraction.follow_up_message.strip() or default_follow_up_message(action, missing_slots)
+        return action, slots, missing_slots, follow_up_message
 
     def _prepare_state(self, state: OrderWorkflowState) -> dict[str, Any]:
         conversation = state["conversation"]
@@ -407,27 +424,21 @@ class TicketOrderServer(A2AServer):
         pending_context = extract_pending_context(latest_query)
         clean_query = strip_pending_context(latest_query)
         username = extract_username(conversation)
-        action = determine_action(clean_query, pending_context)
+        action, slots, missing_slots, follow_up_message = self._extract_workflow(conversation, clean_query, pending_context)
         next_state: dict[str, Any] = {
             "latest_query": latest_query,
             "clean_query": clean_query,
             "username": username,
+            "domain": "order",
             "action": action,
+            "slots": slots,
+            "missing_slots": missing_slots,
             "pending_context": pending_context,
         }
-        if action in {"cancel_order", "change_order"}:
-            payload, missing_fields, follow_up_message, pending = self._extract_operation_payload(
-                action=action,
-                conversation=conversation,
-                query=clean_query,
-                pending_context=pending_context,
-            )
-            next_state["operation_payload"] = payload
-            next_state["missing_fields"] = missing_fields
-            if missing_fields:
-                next_state["pending_order_context"] = pending
-                next_state["final_text"] = follow_up_message
-                next_state["final_state"] = "input_required"
+        if missing_slots:
+            next_state["next_pending_context"] = build_pending_context_payload(action, clean_query, slots, missing_slots)
+            next_state["final_text"] = follow_up_message
+            next_state["final_state"] = "input_required"
         return next_state
 
     @staticmethod
@@ -437,18 +448,46 @@ class TicketOrderServer(A2AServer):
         return state["action"]
 
     def _query_orders_node(self, state: OrderWorkflowState) -> dict[str, Any]:
-        data = asyncio.run(query_my_orders(state["username"], extract_departure_date(state["clean_query"])))
+        slots = state.get("slots", {})
+        order_types = extract_query_order_types(state.get("clean_query", ""))
+        data = asyncio.run(
+            query_my_orders_with_filter(
+                state["username"],
+                str(slots.get("departure_date", "")),
+                str(slots.get("query_order_type", "")),
+                order_types,
+            )
+        )
         return {"final_text": data, "final_state": "completed"}
 
     def _cancel_order_node(self, state: OrderWorkflowState) -> dict[str, Any]:
-        payload = dict(state["operation_payload"])
-        payload["username"] = state["username"]
+        slots = state.get("slots", {})
+        payload = {
+            "username": state["username"],
+            "departure_date": str(slots.get("departure_date", "")),
+            "departure_city": str(slots.get("departure_city", "")),
+            "arrival_city": str(slots.get("arrival_city", "")),
+            "transport_no": str(slots.get("transport_no", "")),
+            "ticket_type": str(slots.get("ticket_type", "")),
+            "order_type": str(slots.get("order_type", "")),
+        }
         data = asyncio.run(invoke_order_tool("cancel_ticket_order", payload))
         return {"final_text": data, "final_state": "completed"}
 
     def _change_order_node(self, state: OrderWorkflowState) -> dict[str, Any]:
-        payload = dict(state["operation_payload"])
-        payload["username"] = state["username"]
+        slots = state.get("slots", {})
+        payload = {
+            "username": state["username"],
+            "current_departure_date": str(slots.get("departure_date", "")),
+            "departure_city": str(slots.get("departure_city", "")),
+            "arrival_city": str(slots.get("arrival_city", "")),
+            "current_transport_no": str(slots.get("transport_no", "")),
+            "current_ticket_type": str(slots.get("ticket_type", "")),
+            "new_departure_date": str(slots.get("new_departure_date", "")),
+            "new_transport_no": str(slots.get("new_transport_no", "")),
+            "new_ticket_type": str(slots.get("new_ticket_type", "")),
+            "order_type": str(slots.get("order_type", "")),
+        }
         data = asyncio.run(invoke_order_tool("change_ticket_order", payload))
         return {"final_text": data, "final_state": "completed"}
 
@@ -461,7 +500,6 @@ class TicketOrderServer(A2AServer):
 
         if ticket_result_task.status.state != "completed":
             required_message = ticket_result_task.status.message["content"]["text"]
-            logger.info(f"余票未查到：{required_message}")
             task_state = str(ticket_result_task.status.state).split(".")[-1].lower()
             final_state: Literal["completed", "failed", "input_required"] = (
                 "input_required" if task_state == "input_required" else "failed"
@@ -474,9 +512,31 @@ class TicketOrderServer(A2AServer):
 
         ticket_result = ticket_result_task.artifacts[0]["parts"][0]["text"]
         logger.info(f"余票信息: {ticket_result}")
+        candidates = parse_ticket_candidates(ticket_result)
+        selected = select_ticket_candidate(candidates, state.get("slots", {}))
+        if not selected:
+            return {
+                "ticket_task_state": "failed",
+                "final_text": "未能从查票结果中定位可下单的具体车次/航班，请补充更明确的车次、航班号或席位信息。",
+                "final_state": "input_required",
+                "next_pending_context": build_pending_context_payload(
+                    "create_order",
+                    state["clean_query"],
+                    state.get("slots", {}),
+                    ["transport_no_or_ticket_type"],
+                ),
+            }
+        execution_payload = {
+            "order_type": selected["order_type"],
+            "departure_date": selected["departure_time"][:10],
+            "transport_no": selected["transport_no"],
+            "ticket_type": selected["ticket_type"],
+            "quantity": int(state.get("slots", {}).get("quantity", 1)),
+        }
         return {
             "ticket_task_state": "completed",
             "ticket_result_text": ticket_result,
+            "execution_payload": execution_payload,
         }
 
     @staticmethod
@@ -484,19 +544,35 @@ class TicketOrderServer(A2AServer):
         return "create_order" if state.get("ticket_task_state") == "completed" else "finish"
 
     def _create_order_node(self, state: OrderWorkflowState) -> dict[str, Any]:
-        username = state["username"]
-        conversation = state["conversation"]
-        ticket_result = state["ticket_result_text"]
-        order_result = asyncio.run(
-            run_order_agent(f"{conversation}\n当前用户：{username}\n余票信息：{ticket_result}")
+        payload = dict(state.get("execution_payload", {}))
+        payload["username"] = state["username"]
+        order_type = payload.get("order_type", "")
+        if order_type == "train":
+            tool_name = "order_train"
+            tool_params = {
+                "username": payload["username"],
+                "departure_date": payload["departure_date"],
+                "train_number": payload["transport_no"],
+                "seat_type": payload["ticket_type"],
+                "number": payload["quantity"],
+            }
+        else:
+            tool_name = "order_flight"
+            tool_params = {
+                "username": payload["username"],
+                "departure_date": payload["departure_date"],
+                "flight_number": payload["transport_no"],
+                "seat_type": payload["ticket_type"],
+                "number": payload["quantity"],
+            }
+
+        data = asyncio.run(invoke_order_tool(tool_name, tool_params))
+        final_text = (
+            "余票信息：" + state["ticket_result_text"] + "\n"
+            f"本次下单选择：{payload['departure_date']} {payload['transport_no']} {payload['ticket_type']} {payload['quantity']}张。\n"
+            "订票结果：" + data
         )
-        logger.info(f"MCP 返回: {order_result}")
-        data = order_result.get("message", "")
-        final_state: Literal["completed", "failed", "input_required"] = (
-            "completed" if order_result.get("status") == "success" else "failed"
-        )
-        final_text = "余票信息：" + ticket_result + "\n订票结果：" + data if final_state == "completed" else data
-        return {"final_text": final_text, "final_state": final_state}
+        return {"final_text": final_text, "final_state": "completed"}
 
     def handle_task(self, task):
         content = (task.message or {}).get("content", {})
@@ -512,8 +588,8 @@ class TicketOrderServer(A2AServer):
                 task.status = TaskStatus(state=TaskState.COMPLETED)
             elif final_state == "input_required":
                 content = {"text": final_text}
-                if result.get("pending_order_context"):
-                    content["pending_order_context"] = result["pending_order_context"]
+                if result.get("next_pending_context"):
+                    content["pending_context"] = result["next_pending_context"]
                 task.status = TaskStatus(
                     state=TaskState.INPUT_REQUIRED,
                     message={"role": "agent", "content": content},
@@ -524,11 +600,11 @@ class TicketOrderServer(A2AServer):
                     message={"role": "agent", "content": {"text": final_text}},
                 )
             return task
-        except Exception as e:
-            logger.error(f"查询失败: {str(e)}")
+        except Exception as exc:
+            logger.error(f"订单处理失败: {exc}")
             task.status = TaskStatus(
                 state=TaskState.FAILED,
-                message={"role": "agent", "content": {"text": f"查询失败: {str(e)} 请重试或提供更多细节。"}},
+                message={"role": "agent", "content": {"text": f"订单处理失败: {exc} 请重试或提供更多细节。"}},
             )
             return task
 

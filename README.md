@@ -4,14 +4,16 @@
 
 SmartVoyage 是一个基于 A2A + MCP + LangGraph 的旅行助手示例项目，当前包含：
 
-- `3` 个 MCP 服务
+- `4` 个 MCP 服务
   - 票务查询：`mcp_server/mcp_ticket_server.py`
   - 天气查询：`mcp_server/mcp_weather_server.py`
   - 票务预定：`mcp_server/mcp_order_server.py`
-- `3` 个 A2A 服务
+  - 酒店查询/预订：`mcp_server/mcp_hotel_server.py`
+- `4` 个 A2A 服务
   - 票务查询：`a2a_server/ticket_server.py`
   - 天气查询：`a2a_server/weather_server.py`
   - 票务预定：`a2a_server/order_server.py`
+  - 酒店查询/预订：`a2a_server/hotel_server.py`
 - `2` 个入口
   - Streamlit 前端：`app.py`
   - 命令行入口：`main.py`
@@ -37,6 +39,12 @@ SmartVoyage 是一个基于 A2A + MCP + LangGraph 的旅行助手示例项目，
   - 已新增 `user_preferences`
   - 已支持读取用户偏好画像参与 `travel_plan` 出行推荐
   - 已支持使用 `home_city` 作为追问候选，但不会自动补全查询条件或自动下单
+- 已完成 P4 的第一版最小落地
+  - 已新增酒店基础数据与房型库存
+  - 已支持酒店查询
+  - 已支持酒店预订
+  - 已支持查询酒店订单 / 在统一订单视图中展示酒店订单
+  - 订单域 / 酒店域已统一到 `LangGraph state + LLM 结构化抽取 slots + 后端强校验 + pending_context 多轮补参 + MCP/tool 执行`
 - 当前支持两种模型提供方式：
   - `openai_compatible`
   - `ollama`
@@ -65,7 +73,8 @@ SmartVoyage 是一个基于 A2A + MCP + LangGraph 的旅行助手示例项目，
   - 包含意图识别、天气总结、票务总结、景点推荐等 Prompt。
 - `run_all.py`
   - 一键启动脚本。
-  - 用于统一拉起 6 个后端服务，并可选附带启动 Streamlit 前端。
+  - 用于统一拉起 8 个后端服务，并可选附带启动 Streamlit 前端。
+  - 支持 `--dev-reload` 开发模式，监控代码变更后自动重启后端服务。
 - `requirements.txt`
   - Python 依赖列表。
 - `.env`
@@ -89,6 +98,9 @@ SmartVoyage 是一个基于 A2A + MCP + LangGraph 的旅行助手示例项目，
 - `a2a_server/order_server.py`
   - 票务预定 Agent。
   - 基于 LangGraph 编排“查单 / 下单 / 退票 / 改签”流程。
+- `a2a_server/hotel_server.py`
+  - 酒店 Agent。
+  - 负责酒店查询、酒店预订与酒店订单查询。
 
 ### `mcp_server/`
 
@@ -103,6 +115,9 @@ SmartVoyage 是一个基于 A2A + MCP + LangGraph 的旅行助手示例项目，
 - `mcp_server/mcp_order_server.py`
   - 票务预定 MCP 服务。
   - 提供火车票、机票预定与用户订单查询工具。
+- `mcp_server/mcp_hotel_server.py`
+  - 酒店 MCP 服务。
+  - 提供酒店查询、酒店预订与酒店订单查询工具。
 
 ### `sql/`
 
@@ -111,19 +126,24 @@ SmartVoyage 是一个基于 A2A + MCP + LangGraph 的旅行助手示例项目，
 - `sql/create_table.sql`
   - 创建数据库 `travel_rag` 和相关表结构。
 - `sql/insert_data.sql`
-  - 初始化用户、天气、交通票务等演示数据。
-  - 当前内置的数据以 `2026-03-21` 到 `2026-03-25` 的天气和交通票务为主，适合直接演示查询、订票与订单查询链路。
+  - 初始化用户、天气、交通票务、酒店等演示数据。
+  - 当前内置的数据以 `2026-03-21` 到 `2026-03-25` 的天气、交通票务和 `2026-03-21` 到 `2026-03-23` 的酒店库存为主，适合直接演示查询、预订与订单查询链路。
 
 ### 当前能力边界
 
 - 当前订票和查单默认基于单个演示用户 `demo_user`
-- 当前订单类型只支持 `train` / `flight`
+- 当前订单类型已支持 `train` / `flight` / `hotel`
 - 当前已支持：
   - 交通票务查询
   - 交通票务预定
+  - 酒店查询
+  - 酒店预订
   - 订单落库
-  - 查询我的订单
+  - 查询我的当前已预订订单
+  - 查询我的酒店订单
+  - 按订单类型组合查询我的订单，例如“查询我的飞机票和酒店”
   - 防止同一用户对同一车次/航班、同一席位重复下单
+  - 防止同一用户对同一入住日期、同一酒店、同一房型重复下单
   - 退票
   - 改签
   - 退票/改签缺字段时的多轮补参
@@ -131,7 +151,8 @@ SmartVoyage 是一个基于 A2A + MCP + LangGraph 的旅行助手示例项目，
   - 出发地缺失时，基于 `home_city` 的确认性追问
 - 当前尚未支持：
   - 登录/切换用户
-  - 酒店订单
+  - 酒店取消 / 改期
+  - 酒店深度接入 `travel_plan`
   - 模糊改签（如“改签到下午”）
   - 完整持久化的用户画像采集与维护流程
 
@@ -163,7 +184,7 @@ SmartVoyage 是一个基于 A2A + MCP + LangGraph 的旅行助手示例项目，
   - 根据 `provider` 创建 `ChatOpenAI` 或 `ChatOllama`，并提供结构化输出包装和订票 Agent 构造。
 - `utils/structured_outputs.py`
   - 结构化输出 Schema。
-  - 定义意图识别、天气 SQL、票务 SQL、出行规划等 Pydantic 模型。
+  - 定义意图识别、天气 SQL、票务 SQL、酒店 SQL、出行规划等 Pydantic 模型。
 - `utils/format.py`
   - 数据格式化工具。
   - 主要用于日期、时间、Decimal 等对象的 JSON 序列化。
@@ -358,9 +379,11 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
 - `mcp_ticket_server`
 - `mcp_weather_server`
 - `mcp_order_server`
+- `mcp_hotel_server`
 - `a2a_ticket_server`
 - `a2a_weather_server`
 - `a2a_order_server`
+- `a2a_hotel_server`
 
 
 ### 6.2 一键启动后端 + 前端
@@ -391,6 +414,30 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
 - A2A 服务的终端输出会聚合写入 `logs/a2a.log`。
 - 项目内部业务日志统一写入 `logs/app.log`。
 - `streamlit` 和 `main.py` 会直接占用当前终端显示输出，其中 `main.py` 需要在终端中直接输入问题，因此不会单独写 `main-cli.log`。
+
+
+### 6.3.1 开发模式自动重载
+
+如果你在频繁改后端代码，推荐使用：
+
+```powershell
+.\.venv\Scripts\python.exe run_all.py --dev-reload
+```
+
+这会在检测到项目中的 `.py` / `.sql` / `.md` 文件变化后，自动重启 8 个后端服务。
+
+如果你还想同时开前端：
+
+```powershell
+.\.venv\Scripts\python.exe run_all.py --with-ui --dev-reload
+```
+
+说明：
+
+- `--dev-reload` 当前不支持和 `--with-cli` 同时使用。
+- 推荐开发方式是两个终端：
+  - 终端 A：`run_all.py --dev-reload`
+  - 终端 B：`python main.py`
 
 
 ### 6.4 单独启动前端
@@ -459,9 +506,14 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
 根据2026-03-21上海的天气，帮我判断从北京去上海坐高铁还是飞机更合适，如果有合适票就直接帮我订一张
 帮我预订2026-03-21北京到上海的高铁票，二等座1张
 查询我的订单
+查询我的酒店订单
+查询我的飞机票和酒店
+查询我的飞机票和酒店和火车票
 2026-03-21北京到上海的高铁票，二等座还有多少张
 帮我退掉2026-03-21北京到上海的高铁票
 把我2026-03-21北京到上海的高铁票改签到2026-03-22二等座
+查询2026-03-21上海的酒店
+帮我订2026-03-21上海外滩云际酒店的高级大床房，住2晚1间
 ```
 
 说明：
@@ -535,7 +587,9 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
 - 天气 SQL 生成
 - 票务 SQL 生成
 - 跨 Agent 出行规划
-- 订单退票/改签参数抽取
+- 订单域统一 action / slots 抽取
+- 酒店域统一 action / slots 抽取
+- 通用 `pending_context` 会话态 schema
 
 这样做的好处是：
 
@@ -549,7 +603,8 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
 
 - `utils/orchestrator.py`
 - `utils/resilient_llm.py`
-- `a2a_server/order_server.py` 内部订单图
+- `a2a_server/order_server.py`
+- `a2a_server/hotel_server.py`
 
 当前新增能力：
 
@@ -564,16 +619,21 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
 - 对结构化输出增加重试
 - 对模型调用支持 fallback provider
 - 当天气或票务服务不可用时，返回明确的降级说明，而不是直接报错中断
-- 订单域确定性流程已改为 LangGraph v1.x
-  - `query_orders`
-  - `cancel_order`
-  - `change_order`
-  - `lookup_tickets -> create_order`
-- 退票/改签参数不再依赖纯规则解析
-  - 先由 LLM 按 schema 做结构化抽取
-  - 缺字段时返回 `input_required`
-  - 前端 / CLI 在当前会话内保存 `pending_order_context`，等待用户补充后继续执行
-  - 当前补参机制是轻量会话态，不是 LangGraph 持久化 HITL
+- 订单域与酒店域都已切到统一 state schema
+  - 核心字段：`domain / action / slots / missing_slots / pending_context / execution_payload`
+  - 入口编排层只负责 intent 识别和路由，不再让子域继续走独立关键词分支判断
+  - 对“我的机票和酒店”“我的火车票和酒店”这类表达，入口层会优先收敛为单一 `my_orders`，避免被错误拆成 `my_orders + hotel`
+- 订单域 LangGraph 流程
+  - `prepare -> query_orders | cancel_order | change_order | lookup_tickets -> create_order`
+  - `prepare` 节点统一由 LLM 产出 action 与 slots，再由后端计算缺失字段、生成追问和执行 payload
+- 酒店域 LangGraph 流程
+  - `prepare -> query_hotels | query_hotel_orders | create_hotel_order`
+  - 酒店查询已从“再生成 SQL 的二次 LLM 判断”改为“先抽 slots，再由后端确定性拼 SQL 并调 MCP”
+- 多轮补参统一机制
+  - 子域返回 `input_required + pending_context`
+  - 前端 / CLI 在当前会话内保存 `pending_context`
+  - 用户下一轮补充后，编排层会将该上下文回注给对应子域继续执行
+  - 当前补参机制仍是轻量会话态，不是 LangGraph 持久化 HITL
 
 
 ## 10. 常见问题
@@ -589,7 +649,7 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
 检查 `.env` 并重启所有服务。
 
 
-### 10.3 运行测试时提示无法连接 `8001/8002/8003/5005/5006/5007`
+### 10.3 运行测试时提示无法连接 `8001/8002/8003/8004/5005/5006/5007/5008`
 
 说明后端服务没有启动。先执行：
 
@@ -620,7 +680,7 @@ ollama pull 你的模型名
 
 ### 10.6 启动时报端口已被占用
 
-如果日志里出现 `8001/8002/8003/5005/5006/5007` 已被占用，通常说明旧服务还没退出。
+如果日志里出现 `8001/8002/8003/8004/5005/5006/5007/5008` 已被占用，通常说明旧服务还没退出。
 
 - 先关闭旧的 Python 进程
 - 再重新执行 `run_all.py`
@@ -654,8 +714,11 @@ ollama pull 你的模型名
 - 当前是单用户演示模式，默认用户由 `SMARTVOYAGE_DEFAULT_USERNAME` 控制，不是真正的登录系统。
 - 当前“防重复下单”基于精确匹配：同一用户、同一出发时间、同一车次/航班、同一席位类型会被拦截；更宽泛的“相似订单理解”还没做。
 - 当前重复下单时仍以直接拦截文案为主，还没有进入完整的“是否继续下单 / 改签 / 退票”多轮对话编排。
-- 当前票务查询和订单查询已经能共享部分状态，但仍不是完整的统一会话状态管理。
-- 当前退票/改签的补参仅在当前会话内生效，不做跨进程、跨重启持久化。
+- 当前订单域与酒店域已经统一到一套会话 state schema，但 pending_context 仍只保存在当前前端 / CLI 会话内。
+- 当前订单查询虽然已支持“飞机票 + 酒店 + 火车票”这类多类型组合过滤，但这部分类型组合仍主要靠后端规则做确定性收敛，不是完整的通用多标签 schema。
+- 当前酒店库存是按示例日期初始化的离散库存，不是完整 CRS / PMS 模型。
+- 当前酒店预订已支持查询、预订、查订单，但还没有取消、改期和多酒店联动编排。
+- 当前 `pending_context` 补参仅在当前会话内生效，不做跨进程、跨重启持久化。
 - 当前改签优先支持显式条件；对模糊时间表达（如“下午”“晚上”）会优先追问，不做自由脑补。
 
 ## 12. 推荐使用顺序

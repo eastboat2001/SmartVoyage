@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -7,6 +7,7 @@ SupportedIntent = Literal[
     "weather",
     "flight",
     "train",
+    "hotel",
     "order",
     "my_orders",
     "cancel_order",
@@ -15,6 +16,9 @@ SupportedIntent = Literal[
     "attraction",
     "out_of_scope",
 ]
+
+OrderAction = Literal["create_order", "query_orders", "cancel_order", "change_order"]
+HotelAction = Literal["query_hotels", "query_hotel_orders", "create_hotel_order"]
 
 
 class IntentRecognitionResult(BaseModel):
@@ -39,27 +43,41 @@ class TravelPlanResult(BaseModel):
         return self
 
 
-class OrderOperationExtractionResult(BaseModel):
-    action: Literal["cancel_order", "change_order"]
+class PendingContextPayload(BaseModel):
+    domain: Literal["order", "hotel"]
+    action: str
+    missing_slots: list[str] = Field(default_factory=list)
+    slots: dict[str, Any] = Field(default_factory=dict)
+    original_query: str = ""
+
+
+class OrderWorkflowExtractionResult(BaseModel):
+    domain: Literal["order"] = "order"
+    action: OrderAction
+    query_order_type: Literal["", "transport", "train", "flight", "hotel"] = ""
     order_type: Literal["train", "flight", ""] = ""
-    current_departure_date: str = ""
+    departure_date: str = ""
     departure_city: str = ""
     arrival_city: str = ""
-    current_transport_no: str = ""
-    current_ticket_type: str = ""
+    transport_no: str = ""
+    ticket_type: str = ""
+    quantity: int = 1
     new_departure_date: str = ""
     new_transport_no: str = ""
     new_ticket_type: str = ""
-    is_complete: bool = False
-    missing_fields: list[str] = Field(default_factory=list)
+    missing_slots: list[str] = Field(default_factory=list)
     follow_up_message: str = ""
+    is_complete: bool = False
 
     @model_validator(mode="after")
     def validate_payload(self):
-        if not self.follow_up_message.strip():
-            self.follow_up_message = ""
-
-        if self.action == "change_order":
+        if self.quantity <= 0:
+            self.quantity = 1
+        if self.is_complete and self.missing_slots:
+            raise ValueError("complete extraction should not contain missing_slots")
+        if not self.is_complete and not self.follow_up_message.strip():
+            raise ValueError("incomplete extraction requires follow_up_message")
+        if self.action == "change_order" and self.is_complete:
             has_new_target = any(
                 [
                     self.new_departure_date.strip(),
@@ -67,13 +85,8 @@ class OrderOperationExtractionResult(BaseModel):
                     self.new_ticket_type.strip(),
                 ]
             )
-            if self.is_complete and not has_new_target:
+            if not has_new_target:
                 raise ValueError("change_order requires at least one new target field when complete")
-
-        if self.is_complete and self.missing_fields:
-            raise ValueError("complete extraction should not contain missing_fields")
-        if not self.is_complete and not self.follow_up_message.strip():
-            raise ValueError("incomplete extraction requires follow_up_message")
         return self
 
 
@@ -104,6 +117,46 @@ class TicketSqlResult(BaseModel):
                 raise ValueError("sql status requires a ticket type")
             if not self.sql.strip():
                 raise ValueError("sql status requires a non-empty sql field")
+        if self.status == "input_required" and not self.message.strip():
+            raise ValueError("input_required status requires a non-empty message field")
+        return self
+
+
+class HotelWorkflowExtractionResult(BaseModel):
+    domain: Literal["hotel"] = "hotel"
+    action: HotelAction
+    city: str = ""
+    hotel_name: str = ""
+    room_type: str = ""
+    check_in_date: str = ""
+    nights: int = 1
+    rooms: int = 1
+    missing_slots: list[str] = Field(default_factory=list)
+    follow_up_message: str = ""
+    is_complete: bool = False
+
+    @model_validator(mode="after")
+    def validate_payload(self):
+        if self.nights <= 0:
+            self.nights = 1
+        if self.rooms <= 0:
+            self.rooms = 1
+        if self.is_complete and self.missing_slots:
+            raise ValueError("complete extraction should not contain missing_slots")
+        if not self.is_complete and not self.follow_up_message.strip():
+            raise ValueError("incomplete extraction requires follow_up_message")
+        return self
+
+
+class HotelSqlResult(BaseModel):
+    status: Literal["sql", "input_required"]
+    sql: str = ""
+    message: str = ""
+
+    @model_validator(mode="after")
+    def validate_payload(self):
+        if self.status == "sql" and not self.sql.strip():
+            raise ValueError("sql status requires a non-empty sql field")
         if self.status == "input_required" and not self.message.strip():
             raise ValueError("input_required status requires a non-empty message field")
         return self

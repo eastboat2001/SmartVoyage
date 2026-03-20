@@ -61,12 +61,28 @@ class OrderService:
             ticket_type_column="cabin_type",
         )
 
-    def query_user_orders(self, username: str, departure_date: str = "") -> str:
+    def query_user_orders(
+        self,
+        username: str,
+        departure_date: str = "",
+        order_type: str = "",
+        order_types: str = "",
+    ) -> str:
         conn = get_db_connection(self.config)
         try:
             cursor = conn.cursor(dictionary=True)
             filters = ["u.username = %s", "o.status = 'booked'"]
             params: list[object] = [username]
+            normalized_order_types = [item.strip() for item in order_types.split(",") if item.strip()]
+            if normalized_order_types:
+                placeholders = ", ".join(["%s"] * len(normalized_order_types))
+                filters.append(f"o.order_type IN ({placeholders})")
+                params.extend(normalized_order_types)
+            elif order_type == "transport":
+                filters.append("o.order_type IN ('train', 'flight')")
+            elif order_type:
+                filters.append("o.order_type = %s")
+                params.append(order_type)
             if departure_date:
                 filters.append("DATE(o.departure_time) = %s")
                 params.append(departure_date)
@@ -78,6 +94,8 @@ class OrderService:
                     o.arrival_city,
                     o.departure_time,
                     o.transport_no,
+                    o.hotel_name,
+                    o.stay_nights,
                     o.ticket_or_room_type,
                     o.quantity,
                     o.unit_price,
@@ -99,15 +117,26 @@ class OrderService:
 
             lines = [f"{username} 的已预订订单如下："]
             for order in orders:
-                lines.append(
-                    f"订单#{order['id']}：{self._order_type_label(order['order_type'])}，"
-                    f"{order['departure_city']} -> {order['arrival_city']}，"
-                    f"{order['departure_time']}，"
-                    f"{order['transport_no']}，"
-                    f"{order['ticket_or_room_type']}，"
-                    f"{order['quantity']}张，"
-                    f"总价 {order['total_price']} 元。"
-                )
+                if order["order_type"] == "hotel":
+                    lines.append(
+                        f"订单#{order['id']}：酒店，"
+                        f"{order['departure_city']} {order['hotel_name']}，"
+                        f"{order['departure_time']} 入住，"
+                        f"{order['ticket_or_room_type']}，"
+                        f"{order['quantity']}间，"
+                        f"{order['stay_nights']}晚，"
+                        f"总价 {order['total_price']} 元。"
+                    )
+                else:
+                    lines.append(
+                        f"订单#{order['id']}：{self._order_type_label(order['order_type'])}，"
+                        f"{order['departure_city']} -> {order['arrival_city']}，"
+                        f"{order['departure_time']}，"
+                        f"{order['transport_no']}，"
+                        f"{order['ticket_or_room_type']}，"
+                        f"{order['quantity']}张，"
+                        f"总价 {order['total_price']} 元。"
+                    )
             return "\n".join(lines)
         finally:
             conn.close()
@@ -618,7 +647,11 @@ class OrderService:
 
     @staticmethod
     def _order_type_label(order_type: str) -> str:
-        return "高铁票" if order_type == "train" else "机票"
+        if order_type == "train":
+            return "高铁票"
+        if order_type == "flight":
+            return "机票"
+        return "酒店"
 
     def _phone_for_username(self, username: str) -> str:
         if username == self.config.default_username:
@@ -651,11 +684,19 @@ def order_flight(username: str, departure_date: str, flight_number: str, seat_ty
 
 @order_mcp.tool(
     name="query_user_orders",
-    description="根据用户名查询当前已预订订单，可选按出发日期过滤"
+    description="根据用户名查询当前已预订订单，可选按出发日期、单个订单类型或多个订单类型过滤"
 )
-def query_user_orders(username: str, departure_date: str = "") -> str:
-    logger.info(f"正在查询用户订单: {username}, departure_date={departure_date}")
-    return service.query_user_orders(username, departure_date)
+def query_user_orders(
+    username: str,
+    departure_date: str = "",
+    order_type: str = "",
+    order_types: str = "",
+) -> str:
+    logger.info(
+        f"正在查询用户订单: {username}, departure_date={departure_date}, "
+        f"order_type={order_type}, order_types={order_types}"
+    )
+    return service.query_user_orders(username, departure_date, order_type, order_types)
 
 
 @order_mcp.tool(

@@ -31,13 +31,22 @@ SERVICES = [
     ("mcp-ticket", [PYTHON, "-u", "mcp_server/mcp_ticket_server.py"]),
     ("mcp-weather", [PYTHON, "-u", "mcp_server/mcp_weather_server.py"]),
     ("mcp-order", [PYTHON, "-u", "mcp_server/mcp_order_server.py"]),
+    ("mcp-hotel", [PYTHON, "-u", "mcp_server/mcp_hotel_server.py"]),
     ("a2a-ticket", [PYTHON, "-u", "a2a_server/ticket_server.py"]),
     ("a2a-weather", [PYTHON, "-u", "a2a_server/weather_server.py"]),
     ("a2a-order", [PYTHON, "-u", "a2a_server/order_server.py"]),
+    ("a2a-hotel", [PYTHON, "-u", "a2a_server/hotel_server.py"]),
 ]
 
 UI_SERVICE = ("streamlit", [PYTHON, "-m", "streamlit", "run", "app.py"])
 CLI_SERVICE = ("main-cli", [PYTHON, "main.py"])
+WATCH_DIRS = [
+    ROOT / "a2a_server",
+    ROOT / "mcp_server",
+    ROOT / "utils",
+    ROOT,
+]
+WATCH_FILE_SUFFIXES = {".py", ".md", ".sql"}
 
 def terminate_process(process: subprocess.Popen) -> None:
     if process.poll() is not None:
@@ -111,6 +120,43 @@ def run_interactive_process(name: str, command: list[str]) -> int:
     )
 
 
+def snapshot_watch_files() -> dict[Path, int]:
+    snapshot: dict[Path, int] = {}
+    for watch_dir in WATCH_DIRS:
+        if not watch_dir.exists():
+            continue
+        for path in watch_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in WATCH_FILE_SUFFIXES:
+                continue
+            try:
+                snapshot[path] = path.stat().st_mtime_ns
+            except OSError:
+                continue
+    return snapshot
+
+
+def diff_watch_files(previous: dict[Path, int], current: dict[Path, int]) -> list[Path]:
+    changed: list[Path] = []
+    all_paths = set(previous) | set(current)
+    for path in sorted(all_paths):
+        if previous.get(path) != current.get(path):
+            changed.append(path)
+    return changed
+
+
+def restart_process(
+    name: str,
+    command: list[str],
+    process: subprocess.Popen,
+) -> tuple[subprocess.Popen, Path]:
+    terminate_process(process)
+    new_process, log_path = start_process(name, command)
+    print(f"[launcher] restarted {name} -> {log_path.relative_to(ROOT)}")
+    return new_process, log_path
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Start SmartVoyage services.")
     mode_group = parser.add_mutually_exclusive_group()
@@ -130,15 +176,33 @@ def main() -> int:
         default=1.0,
         help="Delay in seconds between process starts.",
     )
+    parser.add_argument(
+        "--dev-reload",
+        action="store_true",
+        help="Watch project files and automatically restart backend services when code changes.",
+    )
+    parser.add_argument(
+        "--watch-interval",
+        type=float,
+        default=1.0,
+        help="Polling interval in seconds for --dev-reload.",
+    )
     args = parser.parse_args()
+
+    if args.dev_reload and args.with_cli:
+        print("[launcher] --dev-reload 暂不支持和 --with-cli 同时使用。")
+        return 2
 
     prepare_log_dir()
     processes: list[tuple[str, subprocess.Popen, Path]] = []
+    service_processes: dict[str, tuple[subprocess.Popen, Path]] = {}
+    service_commands = {name: command for name, command in SERVICES}
 
     try:
         for name, command in SERVICES:
             process, log_path = start_process(name, command)
             processes.append((name, process, log_path))
+            service_processes[name] = (process, log_path)
             print(f"[launcher] started {name} -> {log_path.relative_to(ROOT)}")
             time.sleep(args.startup_delay)
 
@@ -151,11 +215,39 @@ def main() -> int:
         print("[launcher] mcp service output -> logs/mcp.log")
         print("[launcher] a2a service output -> logs/a2a.log")
         print("[launcher] application logger -> logs/app.log")
+        if args.dev_reload:
+            print("[launcher] dev reload enabled")
 
         if args.with_cli:
             return run_interactive_process(*CLI_SERVICE)
 
+        watch_snapshot = snapshot_watch_files() if args.dev_reload else {}
         while True:
+            if args.dev_reload:
+                current_snapshot = snapshot_watch_files()
+                changed_files = diff_watch_files(watch_snapshot, current_snapshot)
+                if changed_files:
+                    display_files = ", ".join(str(path.relative_to(ROOT)) for path in changed_files[:5])
+                    if len(changed_files) > 5:
+                        display_files += ", ..."
+                    print(f"[launcher] detected changes: {display_files}")
+                    restarted_services: list[str] = []
+                    for name in service_commands:
+                        old_process, _ = service_processes[name]
+                        new_process, log_path = restart_process(name, service_commands[name], old_process)
+                        service_processes[name] = (new_process, log_path)
+                        restarted_services.append(name)
+                    processes = [
+                        (name, service_processes[name][0], service_processes[name][1])
+                        if name in service_processes
+                        else (name, proc, log_path)
+                        for name, proc, log_path in processes
+                    ]
+                    print(f"[launcher] restarted services: {', '.join(restarted_services)}")
+                    watch_snapshot = current_snapshot
+                    time.sleep(args.startup_delay)
+                    continue
+
             failed = [
                 (name, proc.returncode, log_path)
                 for name, proc, log_path in processes
@@ -171,7 +263,7 @@ def main() -> int:
                             f"See {log_path.relative_to(ROOT)} for details."
                         )
                 return 1
-            time.sleep(1)
+            time.sleep(args.watch_interval if args.dev_reload else 1)
 
     except KeyboardInterrupt:
         print("[launcher] stopping processes")

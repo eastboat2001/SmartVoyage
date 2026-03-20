@@ -57,16 +57,46 @@ CREATE TABLE flight_tickets (
     UNIQUE KEY unique_flight (departure_time, flight_number) -- 唯一约束，确保同一时间和航班号不重复
 ) COMMENT='航班机票信息表';
 
+CREATE TABLE hotels (
+    id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键，自增，唯一标识酒店',
+    name VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '酒店名称',
+    city VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '所在城市',
+    district VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '所在区域',
+    star_rating INT NOT NULL COMMENT '酒店星级',
+    address VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '酒店地址',
+    description VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '酒店简介',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    UNIQUE KEY unique_hotel_city_name (city, name)
+) COMMENT='酒店基础信息表';
+
+CREATE TABLE hotel_room_inventory (
+    id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键，自增，唯一标识房型库存记录',
+    hotel_id INT NOT NULL COMMENT '酒店ID',
+    stay_date DATE NOT NULL COMMENT '入住日期',
+    room_type VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '房型',
+    bed_type VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '床型',
+    breakfast_included BOOLEAN NOT NULL DEFAULT FALSE COMMENT '是否含早',
+    is_refundable BOOLEAN NOT NULL DEFAULT TRUE COMMENT '是否可退',
+    total_rooms INT NOT NULL COMMENT '总房量',
+    remaining_rooms INT NOT NULL COMMENT '剩余房量',
+    price_per_night DECIMAL(10, 2) NOT NULL COMMENT '每晚单价',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    UNIQUE KEY unique_hotel_inventory (hotel_id, stay_date, room_type),
+    CONSTRAINT fk_hotel_inventory_hotel FOREIGN KEY (hotel_id) REFERENCES hotels(id)
+) COMMENT='酒店房型库存表';
+
 CREATE TABLE orders (
     id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键，自增，唯一标识订单',
     user_id INT NOT NULL COMMENT '用户ID',
-    order_type ENUM('train', 'flight') NOT NULL COMMENT '订单类型',
+    order_type ENUM('train', 'flight', 'hotel') NOT NULL COMMENT '订单类型',
     status ENUM('booked', 'changed', 'cancelled') NOT NULL DEFAULT 'booked' COMMENT '订单状态',
     departure_city VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '出发城市',
     arrival_city VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '到达城市',
     departure_time DATETIME NOT NULL COMMENT '出发时间',
     ticket_or_room_type VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '座位/舱位类型',
     transport_no VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '车次/航班号',
+    hotel_name VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '酒店名称，仅 hotel 订单使用',
+    stay_nights INT DEFAULT NULL COMMENT '入住晚数，仅 hotel 订单使用',
     quantity INT NOT NULL COMMENT '数量',
     unit_price DECIMAL(10, 2) NOT NULL COMMENT '单价',
     total_price DECIMAL(10, 2) NOT NULL COMMENT '总价',

@@ -25,6 +25,7 @@ DEFAULT_AGENT_URLS = {
     "WeatherQueryAssistant": "http://localhost:5005",
     "TicketQueryAssistant": "http://localhost:5006",
     "TicketOrderAssistant": "http://localhost:5007",
+    "HotelAssistant": "http://localhost:5008",
 }
 
 
@@ -35,7 +36,7 @@ class AgentExecutionResult:
     text: str
     degraded: bool = False
     no_data: bool = False
-    pending_order_context: dict | None = None
+    pending_context: dict | None = None
 
 
 @dataclass
@@ -138,14 +139,47 @@ class SmartVoyageOrchestrator:
             },
             description="意图识别",
         )
-        logger.info(f"意图识别结构化响应: {result.model_dump()}")
-        return result.intents, result.user_queries, result.follow_up_message
+        intents, user_queries, follow_up_message = self._normalize_intent_result(
+            user_input,
+            result.intents,
+            result.user_queries,
+            result.follow_up_message,
+        )
+        logger.info(
+            f"意图识别结构化响应: intents={intents}, user_queries={user_queries}, follow_up_message={follow_up_message}"
+        )
+        return intents, user_queries, follow_up_message
+
+    @staticmethod
+    def _looks_like_order_query_for_hotel(text: str) -> bool:
+        keywords = ("我的", "订单", "已订", "已预订", "我订了", "查询")
+        return "酒店" in text and any(keyword in text for keyword in keywords)
+
+    def _normalize_intent_result(
+        self,
+        user_input: str,
+        intents: list[str],
+        user_queries: dict[str, str],
+        follow_up_message: str,
+    ) -> tuple[list[str], dict[str, str], str]:
+        normalized_intents = list(dict.fromkeys(intents))
+        normalized_queries = dict(user_queries)
+
+        if "my_orders" in normalized_intents and "hotel" in normalized_intents:
+            hotel_query = normalized_queries.get("hotel", "")
+            base_query = normalized_queries.get("my_orders", user_input)
+            if self._looks_like_order_query_for_hotel(user_input) or self._looks_like_order_query_for_hotel(hotel_query):
+                normalized_intents = [intent for intent in normalized_intents if intent != "hotel"]
+                normalized_queries.pop("hotel", None)
+                normalized_queries["my_orders"] = base_query if "酒店" in base_query else user_input
+
+        return normalized_intents, normalized_queries, follow_up_message
 
     def process_user_input(
         self,
         prompt: str,
         conversation_history: str,
-        pending_order_context: dict | None = None,
+        pending_context: dict | None = None,
     ) -> dict:
         user_profile = self._load_user_preferences()
         precheck_follow_up = self._precheck_home_city_follow_up(prompt, user_profile)
@@ -154,21 +188,21 @@ class SmartVoyageOrchestrator:
                 "response": precheck_follow_up,
                 "intents": [],
                 "routed_agents": [],
-                "pending_order_context": pending_order_context or {},
+                "pending_context": pending_context or {},
             }
 
         intents, user_queries, follow_up_message = self.recognize_intent(
             prompt,
             conversation_history,
         )
-        pending_order_context = pending_order_context or {}
-        intents, user_queries, follow_up_message, pending_order_context = self._merge_pending_order_context(
+        pending_context = pending_context or {}
+        intents, user_queries, follow_up_message, pending_context = self._merge_pending_context(
             prompt,
             conversation_history,
             intents,
             user_queries,
             follow_up_message,
-            pending_order_context,
+            pending_context,
         )
 
         if "out_of_scope" in intents:
@@ -176,7 +210,7 @@ class SmartVoyageOrchestrator:
                 "response": follow_up_message,
                 "intents": intents,
                 "routed_agents": [],
-                "pending_order_context": {},
+                "pending_context": {},
             }
 
         if follow_up_message:
@@ -184,7 +218,7 @@ class SmartVoyageOrchestrator:
                 "response": follow_up_message,
                 "intents": intents,
                 "routed_agents": [],
-                "pending_order_context": pending_order_context,
+                "pending_context": pending_context,
             }
 
         home_city_follow_up = self._maybe_follow_up_with_home_city(intents, user_queries, user_profile)
@@ -193,17 +227,17 @@ class SmartVoyageOrchestrator:
                 "response": home_city_follow_up,
                 "intents": intents,
                 "routed_agents": [],
-                "pending_order_context": pending_order_context,
+                "pending_context": pending_context,
             }
 
         if "travel_plan" in intents:
             result = self._handle_travel_plan(prompt, conversation_history, user_queries, intents, user_profile)
-            result["pending_order_context"] = {}
+            result["pending_context"] = {}
             return result
 
         responses: list[str] = []
         routed_agents: list[str] = []
-        next_pending_order_context: dict = pending_order_context if self._has_order_intent(intents) else {}
+        next_pending_context: dict = pending_context if self._has_pending_domain_intent(intents) else {}
         for intent in intents:
             if intent == "attraction":
                 responses.append(
@@ -222,22 +256,22 @@ class SmartVoyageOrchestrator:
 
             query_str = user_queries.get(intent, prompt)
             query_str = self._with_user_context(intent, query_str)
-            if intent in {"cancel_order", "change_order"} and pending_order_context:
-                query_str = self._with_pending_order_context(query_str, pending_order_context)
+            if intent in {"order", "my_orders", "cancel_order", "change_order", "hotel"} and pending_context:
+                query_str = self._with_pending_context(query_str, pending_context)
             result = self._call_agent(agent_name, query_str, conversation_history)
             routed_agents.append(agent_name)
             responses.append(self._finalize_agent_response(agent_name, query_str, result))
-            if intent in {"order", "my_orders", "cancel_order", "change_order"}:
-                if result.state == "input_required" and result.pending_order_context:
-                    next_pending_order_context = result.pending_order_context
+            if intent in {"order", "my_orders", "cancel_order", "change_order", "hotel"}:
+                if result.state == "input_required" and result.pending_context:
+                    next_pending_context = result.pending_context
                 elif result.state in {"completed", "failed"}:
-                    next_pending_order_context = {}
+                    next_pending_context = {}
 
         return {
             "response": "\n\n".join(responses),
             "intents": intents,
             "routed_agents": routed_agents,
-            "pending_order_context": next_pending_order_context,
+            "pending_context": next_pending_context,
         }
 
     def _handle_travel_plan(
@@ -391,6 +425,9 @@ class SmartVoyageOrchestrator:
                 description="票务总结",
             )
 
+        if agent_name == "HotelAssistant":
+            return result.text
+
         return result.text
 
     def _call_agent(
@@ -452,7 +489,7 @@ class SmartVoyageOrchestrator:
             text=text,
             degraded=state == "failed",
             no_data="未找到" in text,
-            pending_order_context=content.get("pending_order_context") if isinstance(content, dict) else None,
+            pending_context=content.get("pending_context") if isinstance(content, dict) else None,
         )
 
     def _run_sync(self, coro):
@@ -471,6 +508,8 @@ class SmartVoyageOrchestrator:
             return "WeatherQueryAssistant"
         if intent in {"flight", "train"}:
             return "TicketQueryAssistant"
+        if intent == "hotel":
+            return "HotelAssistant"
         if intent in {"order", "my_orders", "cancel_order", "change_order"}:
             return "TicketOrderAssistant"
         return None
@@ -479,31 +518,35 @@ class SmartVoyageOrchestrator:
     def _has_order_intent(intents: list[str]) -> bool:
         return any(intent in {"order", "my_orders", "cancel_order", "change_order"} for intent in intents)
 
-    def _merge_pending_order_context(
+    @staticmethod
+    def _has_pending_domain_intent(intents: list[str]) -> bool:
+        return any(intent in {"order", "my_orders", "cancel_order", "change_order", "hotel"} for intent in intents)
+
+    def _merge_pending_context(
         self,
         prompt: str,
         conversation_history: str,
         intents: list[str],
         user_queries: dict[str, str],
         follow_up_message: str,
-        pending_order_context: dict,
+        pending_context: dict,
     ) -> tuple[list[str], dict[str, str], str, dict]:
-        if not pending_order_context:
+        if not pending_context:
             return intents, user_queries, follow_up_message, {}
 
         if any(intent in {"weather", "flight", "train", "travel_plan", "attraction"} for intent in intents):
             return intents, user_queries, follow_up_message, {}
 
-        if self._has_order_intent(intents):
-            return intents, user_queries, follow_up_message, pending_order_context
+        if self._has_pending_domain_intent(intents):
+            return intents, user_queries, follow_up_message, pending_context
 
-        combined_prompt = self._pending_context_user_prompt(prompt, pending_order_context)
+        combined_prompt = self._pending_context_user_prompt(prompt, pending_context)
         combined_intents, combined_user_queries, combined_follow_up = self.recognize_intent(
             combined_prompt,
             conversation_history,
         )
-        if self._has_order_intent(combined_intents):
-            return combined_intents, combined_user_queries, combined_follow_up, pending_order_context
+        if self._has_pending_domain_intent(combined_intents):
+            return combined_intents, combined_user_queries, combined_follow_up, pending_context
         return intents, user_queries, follow_up_message, {}
 
     def _with_user_context(self, intent: str, query: str) -> str:
@@ -514,16 +557,17 @@ class SmartVoyageOrchestrator:
         return f"当前用户：{self.current_username}\n{query}"
 
     @staticmethod
-    def _with_pending_order_context(query: str, pending_order_context: dict) -> str:
-        if not pending_order_context:
+    def _with_pending_context(query: str, pending_context: dict) -> str:
+        if not pending_context:
             return query
-        payload = json.dumps(pending_order_context, ensure_ascii=False)
-        return f"[PENDING_ORDER_CONTEXT]{payload}[/PENDING_ORDER_CONTEXT]\n{query}"
+        payload = json.dumps(pending_context, ensure_ascii=False)
+        return f"[PENDING_CONTEXT]{payload}[/PENDING_CONTEXT]\n{query}"
 
     @staticmethod
-    def _pending_context_user_prompt(prompt: str, pending_order_context: dict) -> str:
-        payload = json.dumps(pending_order_context, ensure_ascii=False)
-        return f"继续处理之前的订单操作。待补上下文：{payload}。本轮补充：{prompt}"
+    def _pending_context_user_prompt(prompt: str, pending_context: dict) -> str:
+        payload = json.dumps(pending_context, ensure_ascii=False)
+        domain = pending_context.get("domain", "当前任务")
+        return f"继续处理之前的{domain}操作。待补上下文：{payload}。本轮补充：{prompt}"
 
     def _build_ticket_fact_response(self, query_str: str, raw_text: str) -> str:
         normalized_query = query_str.replace("当前用户：", "")
