@@ -22,14 +22,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from create_logger import logger
 from config import Config
-from utils.model_factory import build_chat_model, build_order_agent, extract_text_from_agent_result
+from utils.model_factory import build_order_agent, extract_text_from_agent_result
+from utils.resilient_llm import ResilientModelInvoker
 
 conf = Config()
-
-# 初始化LLM
-llm = build_chat_model(
-    conf,
-)
+model_invoker = ResilientModelInvoker(conf)
 
 # 定义订票函数
 async def order_tickets(query):
@@ -43,9 +40,10 @@ async def order_tickets(query):
 
                     # 从 session 自动获取 MCP server 提供的工具列表。
                     tools = await load_mcp_tools(session)
-                    agent = build_order_agent(llm, tools)
-                    response = await agent.ainvoke(
-                        {"messages": [{"role": "user", "content": query}]}
+                    response = await model_invoker.ainvoke_agent(
+                        lambda model: build_order_agent(model, tools),
+                        {"messages": [{"role": "user", "content": query}]},
+                        description="订票 Agent 执行",
                     )
                     return {
                         "status": "success",
@@ -79,7 +77,6 @@ agent_card = AgentCard(
 class TicketOrderServer(A2AServer):
     def __init__(self):
         super().__init__(agent_card=agent_card)
-        self.llm = llm
         self.ticket_client = A2AClient("http://localhost:5006")
 
     # 处理任务：提取输入，查询余票，调用MCP，结果输出

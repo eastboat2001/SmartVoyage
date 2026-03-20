@@ -53,6 +53,39 @@ class Config:
             "OLLAMA_BASE_URL",
             default="http://127.0.0.1:11434",
         )
+        self.fallback_provider = _first_env(
+            "SMARTVOYAGE_FALLBACK_PROVIDER",
+            default="",
+        ).strip().lower()
+        self.fallback_model_name = _first_env(
+            "SMARTVOYAGE_FALLBACK_MODEL_NAME",
+            default="",
+        )
+        self.fallback_base_url = _first_env(
+            "SMARTVOYAGE_FALLBACK_BASE_URL",
+            default=self.base_url,
+        )
+        self.fallback_api_key = _first_env(
+            "SMARTVOYAGE_FALLBACK_API_KEY",
+            default=self.api_key,
+        )
+        self.fallback_ollama_base_url = _first_env(
+            "SMARTVOYAGE_FALLBACK_OLLAMA_BASE_URL",
+            default=self.ollama_base_url,
+        )
+
+        # 容错策略
+        self.agent_timeout_seconds = float(
+            _first_env("SMARTVOYAGE_AGENT_TIMEOUT_SECONDS", default="18")
+        )
+        self.structured_retry_count = max(
+            1,
+            int(_first_env("SMARTVOYAGE_STRUCTURED_RETRY_COUNT", default="2")),
+        )
+        self.text_retry_count = max(
+            1,
+            int(_first_env("SMARTVOYAGE_TEXT_RETRY_COUNT", default="2")),
+        )
 
         # 数据库配置
         self.host = _first_env("SMARTVOYAGE_DB_HOST", "MYSQL_HOST", default="localhost")
@@ -61,7 +94,10 @@ class Config:
         self.database = _first_env("SMARTVOYAGE_DB_NAME", "MYSQL_DATABASE", default="travel_rag")
 
         # 日志配置
-        self.log_file = str(PROJECT_ROOT / "logs" / "app.log")
+        self.log_file = _first_env(
+            "SMARTVOYAGE_LOG_FILE",
+            default=str(PROJECT_ROOT / "logs" / "app.log"),
+        )
 
         self._warn_if_needed()
 
@@ -76,6 +112,12 @@ class Config:
         if self.provider not in {"openai_compatible", "ollama"}:
             print(
                 f"[Config] 不支持的 provider: {self.provider}。"
+                "当前仅支持 openai_compatible 或 ollama。"
+            )
+
+        if self.fallback_provider and self.fallback_provider not in {"openai_compatible", "ollama"}:
+            print(
+                f"[Config] 不支持的 fallback provider: {self.fallback_provider}。"
                 "当前仅支持 openai_compatible 或 ollama。"
             )
 

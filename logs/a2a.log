@@ -1,0 +1,17 @@
+
+=== 服务器信息 ===
+名称: TicketOrderAssistant
+描述: 通过MCP提供票务预定服务的助手
+
+技能:
+- execute ticket order: 根据客户端提供的输入执行票务预定，返回执行结果
+Starting A2A server on http://127.0.0.1:5007/a2a
+Google A2A compatibility: Enabled
+ * Serving Flask app 'python_a2a.server.http'
+ * Debug mode: off
+INFO:werkzeug:[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on http://127.0.0.1:5007
+INFO:werkzeug:[33mPress CTRL+C to quit[0m
+INFO:werkzeug:127.0.0.1 - - [20/Mar/2026 17:14:09] "GET /agent.json HTTP/1.1" 200 -
+SmartVoage - 2026-03-20 17:15:02,709 - INFO - 对话历史及用户问题: 
+User: 根据2026-03-21上海的天气，帮我

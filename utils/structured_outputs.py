@@ -9,6 +9,7 @@ SupportedIntent = Literal[
     "train",
     "concert",
     "order",
+    "travel_plan",
     "attraction",
     "out_of_scope",
 ]
@@ -18,6 +19,22 @@ class IntentRecognitionResult(BaseModel):
     intents: list[SupportedIntent] = Field(default_factory=list)
     user_queries: dict[str, str] = Field(default_factory=dict)
     follow_up_message: str = ""
+
+
+class TravelPlanResult(BaseModel):
+    transport_mode: Literal["train", "flight"]
+    weather_brief: str = ""
+    recommendation_reason: str
+    ticket_query: str
+    should_order: bool = False
+
+    @model_validator(mode="after")
+    def validate_payload(self):
+        if not self.recommendation_reason.strip():
+            raise ValueError("recommendation_reason is required")
+        if not self.ticket_query.strip():
+            raise ValueError("ticket_query is required")
+        return self
 
 
 class WeatherSqlResult(BaseModel):

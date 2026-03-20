@@ -21,6 +21,8 @@ SmartVoyage 是一个基于 A2A + MCP 的旅行助手示例项目，当前包含
 - LangChain `v1.x`
 - 支持结构化输出，避免模型文本格式漂移打断逻辑
 - 支持 `provider + model factory`
+- 新增统一编排层，支持跨 Agent 协作链路
+- 新增失败恢复与降级：Agent 超时兜底、结构化输出重试、模型 fallback provider
 - 当前支持两种模型提供方式：
   - `openai_compatible`
   - `ollama`
@@ -95,7 +97,8 @@ SmartVoyage 是一个基于 A2A + MCP 的旅行助手示例项目，当前包含
 - `sql/create_table.sql`
   - 创建数据库 `travel_rag` 和相关表结构。
 - `sql/insert_data.sql`
-  - 初始化天气、票务、演唱会等测试数据。
+  - 初始化天气、票务、演唱会等演示数据。
+  - 当前内置的数据以 `2026-03-21` 到 `2026-03-25` 的天气和票务、`2026-04` 的演唱会为主，适合直接演示查询与协作链路。
 
 ### `test/`
 
@@ -241,6 +244,11 @@ SMARTVOYAGE_DB_NAME=travel_rag
 - `SMARTVOYAGE_MODEL_NAME`
 - `SMARTVOYAGE_BASE_URL`
 - `SMARTVOYAGE_API_KEY`
+- 如果你希望模型故障时自动切到备用 provider，还可以额外配置：
+  - `SMARTVOYAGE_FALLBACK_PROVIDER`
+  - `SMARTVOYAGE_FALLBACK_MODEL_NAME`
+  - `SMARTVOYAGE_FALLBACK_BASE_URL`
+  - `SMARTVOYAGE_FALLBACK_API_KEY`
 
 
 ### 4.2 ollama
@@ -278,6 +286,7 @@ SMARTVOYAGE_DB_NAME=travel_rag
 
 - `provider=ollama` 时，不依赖 `SMARTVOYAGE_API_KEY`
 - 票务预定这条链路依赖工具调用能力，建议优先选择支持工具调用/结构化输出更稳定的 Ollama 模型
+- 如果你主模型不是 Ollama，也可以把 Ollama 配成 `SMARTVOYAGE_FALLBACK_PROVIDER=ollama` 作为备用
 
 
 ## 5. 初始化数据库
@@ -292,6 +301,11 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
 ```
 
 如果你的数据库密码不是 `123456`，请先修改 `.env`。
+
+导入完成后，推荐优先使用以下绝对日期做演示，避免“今天 / 明天 / 后天”与本地演示数据错位：
+
+- 天气 / 票务：`2026-03-21` 到 `2026-03-25`
+- 演唱会：`2026-04-03`、`2026-04-10`、`2026-04-12`、`2026-04-18`、`2026-04-26`
 
 
 ## 6. 启动项目
@@ -325,7 +339,26 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
 - `streamlit run app.py`
 
 
-### 6.3 单独启动前端
+### 6.3 一键启动后端 + 命令行入口
+
+```powershell
+.\.venv\Scripts\python.exe run_all.py --with-cli
+```
+
+这会额外启动：
+
+- `python main.py`
+
+说明：
+
+- `run_all.py` 每次启动前会自动清空 `logs` 目录下已有的 `.log` 文件。
+- MCP 服务的终端输出会聚合写入 `logs/mcp.log`。
+- A2A 服务的终端输出会聚合写入 `logs/a2a.log`。
+- 项目内部业务日志统一写入 `logs/app.log`。
+- `streamlit` 和 `main.py` 会直接占用当前终端显示输出，其中 `main.py` 需要在终端中直接输入问题，因此不会单独写 `main-cli.log`。
+
+
+### 6.4 单独启动前端
 
 如果后端已经启动，也可以单独运行：
 
@@ -334,7 +367,9 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
 ```
 
 
-### 6.4 命令行入口
+### 6.5 命令行入口
+
+如果后端已经启动，也可以单独运行：
 
 ```powershell
 .\.venv\Scripts\python.exe main.py
@@ -377,6 +412,25 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
 .\.venv\Scripts\python.exe test\test_weather_mcp_server.py
 ```
 
+### 7.6 推荐演示问题
+
+建议优先使用数据库里明确存在的绝对日期进行演示：
+
+```text
+查询2026-03-21杭州的天气
+查询2026-03-21北京到杭州的高铁票
+查询2026-03-21北京到杭州的机票
+根据2026-03-21杭州的天气，帮我判断从北京去杭州更适合坐高铁还是飞机，并查询对应票务
+根据2026-03-21上海的天气，帮我判断从北京去上海坐高铁还是飞机更合适，如果有合适票就直接帮我订一张
+查询2026-04-03北京周杰伦演唱会门票
+查询2026-04-10上海五月天演唱会VIP票
+```
+
+说明：
+
+- `travel_plan` 协作链路建议优先测试北京到杭州、北京到上海。
+- 如果你临时修改了 `sql/insert_data.sql`，记得重新导入数据库后再测试。
+
 
 ## 8. 当前关键配置项说明
 
@@ -392,6 +446,16 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
   - 仅 `openai_compatible` 使用
 - `SMARTVOYAGE_OLLAMA_BASE_URL`
   - 仅 `ollama` 使用
+- `SMARTVOYAGE_FALLBACK_PROVIDER`
+  - 备用模型 provider，可选：`openai_compatible` / `ollama`
+- `SMARTVOYAGE_FALLBACK_MODEL_NAME`
+  - 主模型失败后的备用模型名称
+- `SMARTVOYAGE_AGENT_TIMEOUT_SECONDS`
+  - Agent 调用超时时间，默认 `18`
+- `SMARTVOYAGE_STRUCTURED_RETRY_COUNT`
+  - 结构化输出重试次数，默认 `2`
+- `SMARTVOYAGE_TEXT_RETRY_COUNT`
+  - 普通文本生成重试次数，默认 `2`
 
 ### 数据库相关
 
@@ -430,12 +494,31 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
 - 意图识别
 - 天气 SQL 生成
 - 票务 SQL 生成
+- 跨 Agent 出行规划
 
 这样做的好处是：
 
 - 不再依赖模型输出固定 JSON 文本
 - 不再依赖手工字符串拆解
 - 模型格式漂移时更容易发现并定位问题
+
+### 统一编排层
+
+定义在：
+
+- `utils/orchestrator.py`
+- `utils/resilient_llm.py`
+
+当前新增能力：
+
+- 对 `travel_plan` 意图做真正的跨 Agent 协作
+  - 先查天气
+  - 再基于天气决策高铁或飞机
+  - 然后继续查票，必要时继续订票
+- 对 Agent 调用增加超时控制
+- 对结构化输出增加重试
+- 对模型调用支持 fallback provider
+- 当天气或票务服务不可用时，返回明确的降级说明，而不是直接报错中断
 
 
 ## 10. 常见问题
@@ -489,32 +572,19 @@ ollama pull 你的模型名
 2. 安装依赖
 3. 配置 `.env`
 4. 初始化 MySQL 数据库
-5. 运行 `run_all.py --with-ui`
-6. 在前端或测试脚本中验证链路
+5. 根据你的演示方式选择：
+6. `run_all.py`
+7. 或 `run_all.py --with-ui`
+8. 或 `run_all.py --with-cli`
+9. 在前端、命令行入口或测试脚本中验证链路
 
 
-## 12. 还需要改进的地方（主要以改进多智能体这个方向）
+## 12. 还需要改进的地方
 
-1. 把“多智能体为什么存在”做得更清楚。
-现在项目里是天气查询、票务查询、票务预定三个 Agent，但更像功能拆分，不够像“协作系统”。建议补一个更完整的跨 Agent 场景，比如“根据天气推荐出行方式并查询票，再完成预定”，让 Agent 之间有明确的协商和依赖，而不只是路由。
 
-2.做失败恢复和降级。
-多智能体项目最能体现水平的，不是 happy path，而是异常路径。建议补：
+目前已经有日志和基本降级文案，后续可以继续补：
 
-某个 Agent 超时后的 fallback
-MCP 不可用时的兜底回复
-结构化输出失败时重试
-模型不可用时切换备用 provider
-这比单纯“能运行”更像真实系统。
-
-3. 增加评测和用例集。
-建议做一组固定测试数据，覆盖：
-单意图
-多意图
-多轮追问
-歧义输入
-工具失败
-结构化输出失败
-
-然后给出命中率/成功率。
-LangSmith 很适合做这件事。做法不是“直接评整个项目”，而是先把你要测的能力拆成一个可评测的 target 函数，再喂一组固定 dataset，用自定义 evaluator 打分。
+- 每次跨 Agent 协作的阶段耗时
+- 哪一步触发了 fallback provider
+- 结构化输出重试次数
+- 每类失败路径的命中统计

@@ -9,8 +9,12 @@ class SmartVoyagePrompts:
         return ChatPromptTemplate.from_template(
 """
 系统提示：您是一个专业的旅行意图识别专家，基于用户查询和对话历史，识别其意图，用于调用专门的agent server来执行；为方便后续的agent server处理，可以基于对话历史对用户查询进行改写，使问题更明确。严格遵守规则：
-- 支持意图：['weather' (天气查询), 'flight' (机票查询), 'train' (高铁/火车票查询), 'concert' (演唱会票查询), 'order' (票务预定), 'attraction' (景点推荐)] 或其组合（如 ['weather', 'flight']）。如果意图超出范围，返回意图 'out_of_scope'。
+- 支持意图：['weather' (天气查询), 'flight' (机票查询), 'train' (高铁/火车票查询), 'concert' (演唱会票查询), 'order' (票务预定), 'travel_plan' (基于天气/行程综合推荐出行方式并继续查票或订票), 'attraction' (景点推荐)] 或其组合（如 ['weather', 'flight']）。如果意图超出范围，返回意图 'out_of_scope'。
 - 注意票务预定和票务查询要区分开，涉及到订票时则为order，只是查询则为flight、train或concert。
+- 如果用户明确表达“根据天气推荐坐高铁还是飞机、再帮我查票/订票”这类跨 Agent 协作需求，优先识别为 travel_plan。识别为 travel_plan 时：
+  1. user_queries['travel_plan'] 写整合后的规划请求；
+  2. 如果需要先查天气，再额外补充 user_queries['weather']，供天气 agent 使用；
+  3. 不要再单独输出 flight/train/order，除非用户还明确提出了与规划无关的额外需求。
 - 如果意图为 'out_of_scope'时，此时不需要再进行查询改写，你可以直接根据用户问题进行回复，将回复答案写到follow_up_message中即可。
 - 在进行用户查询改写时，不要回答其问题，也不要修改其原意，只需要将对话历史中跟该查询相关的上下文信息取出来，然后整合到一起，使用户查询更明确即可，要仔细分析上下文信息，不要进行过度整合。如果用户查询跟对话历史无关，则输出原始查询。
 - 如果用户的意图很不明确或者有歧义，可以向其进行追问，将追问问题填充到follow_up_message中。
@@ -20,6 +24,7 @@ class SmartVoyagePrompts:
 {{"intents": ["weather"], "user_queries": {{"weather": "今天北京天气如何"}}, "follow_up_message": ""}}
 {{"intents": ["weather"], "user_queries": {{}}, "follow_up_message": "你问的是今天北京天气状况吗"}}
 {{"intents": ["weather", "flight"], "user_queries": {{"weather": "今天北京天气如何", "flight": "查询一下10月28日，从北京飞往杭州的机票"}}, "follow_up_message": ""}}
+{{"intents": ["travel_plan"], "user_queries": {{"travel_plan": "根据杭州明天的天气，帮我判断从北京去杭州更适合坐高铁还是飞机，并查询对应票务", "weather": "查询杭州明天的天气"}}, "follow_up_message": ""}}
 {{"intents": ["out_of_scope"], "user_queries": {{}}, "follow_up_message": "你好，我是智能旅行助手，欢迎您向我提问"}}
 
 当前日期：{current_date} (Asia/Shanghai)。
@@ -73,6 +78,26 @@ class SmartVoyagePrompts:
 - 保持中文，150-250字。
 
 查询：{query}
+""")
+
+    @staticmethod
+    def travel_planner_prompt():
+        return ChatPromptTemplate.from_template(
+"""
+系统提示：你是 SmartVoyage 的出行协作规划器。你需要根据用户请求、天气结果和上下文，在“天气 Agent -> 票务 Agent -> 订票 Agent”之间做衔接决策。
+
+规则：
+- 必须在 train 或 flight 中二选一，给出推荐 transport_mode。
+- 如果天气结果不可用，也要继续给出保守建议，但要在 recommendation_reason 中明确说明这是在天气缺失下的降级判断。
+- weather_brief 用 1 句话总结天气影响；如果天气不可用，说明“天气服务暂不可用”。
+- ticket_query 必须是一个可以直接发送给票务查询 Agent 的完整中文查询。
+- 如果用户已经明确要求订票，则 should_order=true；如果只是查票或比价，则 should_order=false。
+- 不要虚构具体车次、航班号、站点、舱位余票、出发时段等数据库中未明确给出的细节。票务查询阶段应优先生成较宽松、可命中的查询条件。
+- 不要输出 markdown，不要补充结构化字段以外的内容。
+
+用户请求：{query}
+天气结果：{weather_result}
+当前日期：{current_date} (Asia/Shanghai)
 """)
 
 

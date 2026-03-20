@@ -24,17 +24,21 @@ ORDER_AGENT_SYSTEM_PROMPT = (
 def build_chat_model(
     config: Config,
     *,
+    provider: str | None = None,
     model_name: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    ollama_base_url: str | None = None,
     temperature: float = 0.1,
 ) -> BaseChatModel:
-    provider = config.provider
+    provider = provider or config.provider
     selected_model = model_name or config.model_name
 
     if provider == "openai_compatible":
         return ChatOpenAI(
             model=selected_model,
-            base_url=config.base_url,
-            api_key=config.api_key,
+            base_url=base_url or config.base_url,
+            api_key=api_key or config.api_key,
             temperature=temperature,
         )
 
@@ -46,7 +50,7 @@ def build_chat_model(
             )
         return ChatOllama(
             model=selected_model,
-            base_url=config.ollama_base_url,
+            base_url=ollama_base_url or config.ollama_base_url,
             temperature=temperature,
         )
 

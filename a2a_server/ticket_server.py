@@ -24,15 +24,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config
 from create_logger import logger
-from utils.model_factory import build_chat_model, build_structured_llm
+from utils.resilient_llm import ResilientModelInvoker
 from utils.structured_outputs import TicketSqlResult
 
 conf = Config()
-
-# 初始化LLM
-llm = build_chat_model(
-    conf,
-)
 
 # 数据表 schema
 table_schema_string = """  # 定义票务表SQL schema字符串，用于Prompt上下文
@@ -148,18 +143,19 @@ agent_card = AgentCard(
 class TicketQueryServer(A2AServer):
     def __init__(self):
         super().__init__(agent_card=agent_card)
-        self.llm = llm
+        self.invoker = ResilientModelInvoker(conf)
         self.sql_prompt = sql_prompt
         self.schema = table_schema_string
 
     # 定义生成SQL查询方法，输入对话历史，返回SQL或追问JSON
     def generate_sql_query(self, conversation: str) -> dict:
         try:
-            chain = self.sql_prompt | build_structured_llm(self.llm, TicketSqlResult)
-            # 调用链
             current_date = datetime.now(pytz.timezone('Asia/Shanghai')).strftime('%Y-%m-%d')  # 获取当前日期，格式化为字符串
-            result = chain.invoke(
-                {"conversation": conversation, "current_date": current_date, "table_schema_string": self.schema}
+            result = self.invoker.invoke_structured(
+                self.sql_prompt,
+                TicketSqlResult,
+                {"conversation": conversation, "current_date": current_date, "table_schema_string": self.schema},
+                description="票务 SQL 生成",
             )
             logger.info(f"结构化票务 SQL 输出: {result.model_dump()}")
             return result.model_dump()

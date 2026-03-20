@@ -3,12 +3,11 @@ import os
 import signal
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 
 
-"""
+r"""
 只启动 6 个后端服务：
 
 .\.venv\Scripts\python.exe run_all.py
@@ -16,11 +15,15 @@ from pathlib import Path
 连 Streamlit 前端一起启动：
 .\.venv\Scripts\python.exe run_all.py --with-ui
 
+连命令行入口一起启动：
+.\.venv\Scripts\python.exe run_all.py --with-cli
+
 """
 
 
 
 ROOT = Path(__file__).resolve().parent
+LOG_DIR = ROOT / "logs"
 PYTHON = sys.executable
 
 
@@ -34,13 +37,7 @@ SERVICES = [
 ]
 
 UI_SERVICE = ("streamlit", [PYTHON, "-m", "streamlit", "run", "app.py"])
-
-
-def stream_output(name: str, process: subprocess.Popen) -> None:
-    assert process.stdout is not None
-    for line in process.stdout:
-        print(f"[{name}] {line.rstrip()}")
-
+CLI_SERVICE = ("main-cli", [PYTHON, "main.py"])
 
 def terminate_process(process: subprocess.Popen) -> None:
     if process.poll() is not None:
@@ -54,33 +51,78 @@ def terminate_process(process: subprocess.Popen) -> None:
         process.wait(timeout=5)
 
 
-def start_process(name: str, command: list[str]) -> tuple[subprocess.Popen, threading.Thread]:
+def prepare_log_dir() -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    for log_file in LOG_DIR.glob("*.log"):
+        log_file.write_text("", encoding="utf-8")
+
+
+def log_path_for(name: str) -> Path:
+    if name.startswith("mcp-"):
+        return LOG_DIR / "mcp.log"
+    if name.startswith("a2a-"):
+        return LOG_DIR / "a2a.log"
+    return LOG_DIR / f"{name}.log"
+
+
+def start_process(name: str, command: list[str]) -> tuple[subprocess.Popen, Path]:
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
+    log_path = log_path_for(name)
+    env["SMARTVOYAGE_LOG_FILE"] = str(LOG_DIR / "app.log")
+    log_handle = open(log_path, "a", encoding="utf-8")
 
-    process = subprocess.Popen(
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=ROOT,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
+    finally:
+        log_handle.close()
+    return process, log_path
+
+
+def start_interactive_process(name: str, command: list[str]) -> subprocess.Popen:
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    env["SMARTVOYAGE_LOG_FILE"] = str(LOG_DIR / "app.log")
+    return subprocess.Popen(
         command,
         cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
         env=env,
     )
-    thread = threading.Thread(target=stream_output, args=(name, process), daemon=True)
-    thread.start()
-    return process, thread
+
+
+def run_interactive_process(name: str, command: list[str]) -> int:
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+    env["SMARTVOYAGE_LOG_FILE"] = str(LOG_DIR / "app.log")
+    print(f"[launcher] entering {name}, press Ctrl+C to stop")
+    return subprocess.call(
+        command,
+        cwd=ROOT,
+        env=env,
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Start SmartVoyage services.")
-    parser.add_argument(
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "--with-ui",
         action="store_true",
         help="Also start the Streamlit frontend.",
+    )
+    mode_group.add_argument(
+        "--with-cli",
+        action="store_true",
+        help="Also start the command-line entrypoint.",
     )
     parser.add_argument(
         "--startup-delay",
@@ -90,27 +132,44 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    processes: list[tuple[str, subprocess.Popen]] = []
+    prepare_log_dir()
+    processes: list[tuple[str, subprocess.Popen, Path]] = []
 
     try:
         for name, command in SERVICES:
-            process, _ = start_process(name, command)
-            processes.append((name, process))
-            print(f"[launcher] started {name}")
+            process, log_path = start_process(name, command)
+            processes.append((name, process, log_path))
+            print(f"[launcher] started {name} -> {log_path.relative_to(ROOT)}")
             time.sleep(args.startup_delay)
 
         if args.with_ui:
-            process, _ = start_process(*UI_SERVICE)
-            processes.append((UI_SERVICE[0], process))
-            print("[launcher] started streamlit")
+            process = start_interactive_process(*UI_SERVICE)
+            processes.append((UI_SERVICE[0], process, ROOT / "CONSOLE"))
+            print("[launcher] started streamlit in current terminal")
 
         print("[launcher] all requested processes started, press Ctrl+C to stop")
+        print("[launcher] mcp service output -> logs/mcp.log")
+        print("[launcher] a2a service output -> logs/a2a.log")
+        print("[launcher] application logger -> logs/app.log")
+
+        if args.with_cli:
+            return run_interactive_process(*CLI_SERVICE)
 
         while True:
-            failed = [(name, proc.returncode) for name, proc in processes if proc.poll() is not None]
+            failed = [
+                (name, proc.returncode, log_path)
+                for name, proc, log_path in processes
+                if proc.poll() is not None
+            ]
             if failed:
-                for name, returncode in failed:
-                    print(f"[launcher] {name} exited with code {returncode}")
+                for name, returncode, log_path in failed:
+                    if log_path.name == "CONSOLE":
+                        print(f"[launcher] {name} exited with code {returncode}.")
+                    else:
+                        print(
+                            f"[launcher] {name} exited with code {returncode}. "
+                            f"See {log_path.relative_to(ROOT)} for details."
+                        )
                 return 1
             time.sleep(1)
 
@@ -118,7 +177,7 @@ def main() -> int:
         print("[launcher] stopping processes")
         return 0
     finally:
-        for _, process in reversed(processes):
+        for _, process, _ in reversed(processes):
             terminate_process(process)
 
 

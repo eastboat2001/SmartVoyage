@@ -1,0 +1,7 @@
+SmartVoage - 2026-03-20 17:13:51,044 - INFO - === 票务MCP服务器信息 ===
+SmartVoage - 2026-03-20 17:13:51,045 - INFO - 名称: TicketTools
+SmartVoage - 2026-03-20 17:13:51,045 - INFO - 描述: 票务查询工具，基于 train_tickets, flight_tickets, concert_tickets 表。只支持查询。
+服务器已启动，请访问 http://127.0.0.1:8001/mcp
+SmartVoage - 2026-03-20 17:14:56,958 - INFO - 执行票务查询: SELECT id, departure_city, arrival_city, departure_time, arrival_time, train_number, seat_type, price, remaining_seats FROM train_tickets WHERE departure_city = '北京' AND arrival_city = '上海' AND DATE(departure_time) = '2026-03-21' AND HOUR(departure_time) BETWEEN 7 AND 18 ORDER BY departure_time;
+SmartVoage - 2026-03-20 17:15:07,653 - INFO - 执行票务查询: SELECT id, departure_city, arrival_city, departure_time, arrival_time, train_number, seat_type, price, remaining_seats FROM train_tickets WHERE departure_city = '北京' AND arrival_city = '上海' AND DATE(departure_time) = '2026-03-21' AND train_number = 'G5';
+SmartVoage - 2026-03-20 17:15:40,334 - INFO - 执行票务查询: SELECT id, departure_city, arrival_city, departure_time, arrival_time, train_number, seat_type, price, remaining_seats FROM train_tickets WHERE departure_city = '北京' AND arrival_city = '上海' AND DATE(departure_time) = '2026-03-21' AND train_numb
