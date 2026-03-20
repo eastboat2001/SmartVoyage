@@ -1,0 +1,520 @@
+# SmartVoyage 项目指南
+
+## 1. 项目简介
+
+SmartVoyage 是一个基于 A2A + MCP 的旅行助手示例项目，当前包含：
+
+- `3` 个 MCP 服务
+  - 票务查询：`mcp_server/mcp_ticket_server.py`
+  - 天气查询：`mcp_server/mcp_weather_server.py`
+  - 票务预定：`mcp_server/mcp_order_server.py`
+- `3` 个 A2A 服务
+  - 票务查询：`a2a_server/ticket_server.py`
+  - 天气查询：`a2a_server/weather_server.py`
+  - 票务预定：`a2a_server/order_server.py`
+- `2` 个入口
+  - Streamlit 前端：`app.py`
+  - 命令行入口：`main.py`
+
+当前项目已经改造成：
+
+- LangChain `v1.x`
+- 支持结构化输出，避免模型文本格式漂移打断逻辑
+- 支持 `provider + model factory`
+- 当前支持两种模型提供方式：
+  - `openai_compatible`
+  - `ollama`
+
+
+## 1.1 项目目录结构
+
+下面是项目根目录下主要目录和文件的说明。
+
+### 根目录文件
+
+- `app.py`
+  - Streamlit 图形界面入口。
+  - 负责用户对话、意图识别、调用各个 A2A Agent，并展示结果。
+- `main.py`
+  - 命令行入口。
+  - 功能和 `app.py` 类似，但通过终端交互运行。
+- `config.py`
+  - 项目配置入口。
+  - 负责读取 `.env`、提供默认值，并在关键配置缺失时打印提示。
+- `create_logger.py`
+  - 日志初始化。
+  - 为控制台和日志文件统一创建 logger。
+- `main_prompts.py`
+  - 提示词集中定义。
+  - 包含意图识别、天气总结、票务总结、景点推荐等 Prompt。
+- `run_all.py`
+  - 一键启动脚本。
+  - 用于统一拉起 6 个后端服务，并可选附带启动 Streamlit 前端。
+- `requirements.txt`
+  - Python 依赖列表。
+- `.env`
+  - 当前实际运行配置。
+  - 建议仅本地保存，不要提交真实密钥。
+- `.env.example`
+  - `.env` 模板文件。
+- `README.md`
+  - 项目使用指南。
+
+### `a2a_server/`
+
+这一层是 A2A Agent 服务层，对外提供智能体能力。
+
+- `a2a_server/ticket_server.py`
+  - 票务查询 Agent。
+  - 接收自然语言查询，调用模型生成 SQL，再访问票务 MCP 服务返回结果。
+- `a2a_server/weather_server.py`
+  - 天气查询 Agent。
+  - 接收自然语言查询，调用模型生成 SQL，再访问天气 MCP 服务返回结果。
+- `a2a_server/order_server.py`
+  - 票务预定 Agent。
+  - 先调用票务查询 Agent 获取余票，再通过 MCP 工具完成订票。
+
+### `mcp_server/`
+
+这一层是 MCP 服务层，对外暴露工具能力。
+
+- `mcp_server/mcp_ticket_server.py`
+  - 票务查询 MCP 服务。
+  - 负责执行火车票、机票、演唱会票 SQL 查询。
+- `mcp_server/mcp_weather_server.py`
+  - 天气查询 MCP 服务。
+  - 负责执行天气表 SQL 查询。
+- `mcp_server/mcp_order_server.py`
+  - 票务预定 MCP 服务。
+  - 提供火车票、机票、演出票的预定工具。
+
+### `sql/`
+
+数据库初始化和测试数据目录。
+
+- `sql/create_table.sql`
+  - 创建数据库 `travel_rag` 和相关表结构。
+- `sql/insert_data.sql`
+  - 初始化天气、票务、演唱会等测试数据。
+
+### `test/`
+
+手动验证脚本目录，方便单独测试某条链路。
+
+- `test/test_ticket_mcp_server.py`
+  - 单独测试票务 MCP 服务。
+- `test/test_weather_mcp_server.py`
+  - 单独测试天气 MCP 服务。
+- `test/test_order_mcp_server.py`
+  - 单独测试订票 MCP + LangChain Agent 链路。
+- `test/test_ticket_agent_server.py`
+  - 单独测试票务查询 Agent。
+- `test/test_weather_agent_server.py`
+  - 单独测试天气查询 Agent。
+- `test/test_order_agent_server.py`
+  - 单独测试票务预定 Agent。
+- `test/weather_api.py`
+  - 与天气数据相关的辅助测试脚本。
+
+### `utils/`
+
+通用工具与基础能力封装。
+
+- `utils/model_factory.py`
+  - 模型工厂。
+  - 根据 `provider` 创建 `ChatOpenAI` 或 `ChatOllama`，并提供结构化输出包装和订票 Agent 构造。
+- `utils/structured_outputs.py`
+  - 结构化输出 Schema。
+  - 定义意图识别、天气 SQL、票务 SQL 的 Pydantic 模型。
+- `utils/format.py`
+  - 数据格式化工具。
+  - 主要用于日期、时间、Decimal 等对象的 JSON 序列化。
+- `utils/spider_weather.py`
+  - 天气数据抓取与入库脚本。
+  - 从和风天气接口获取天气数据并写入 MySQL。
+
+### `logs/`
+
+- `logs/app.log`
+  - 项目运行日志文件。
+
+### 其他目录
+
+- `__pycache__/`
+  - Python 编译缓存，可忽略。
+- `.idea/`
+  - IDE 工程配置文件，可忽略。
+- `.jbeval/`
+  - IDE/工具生成目录，一般不参与业务逻辑。
+
+### 建议的阅读顺序
+
+如果你后面要快速理解这个项目，建议按这个顺序看：
+
+1. `README.md`
+2. `config.py`
+3. `run_all.py`
+4. `app.py` 或 `main.py`
+5. `a2a_server/`
+6. `mcp_server/`
+7. `utils/model_factory.py`
+8. `utils/structured_outputs.py`
+9. `sql/`
+
+
+## 2. 环境准备
+
+### 2.1 Python 与依赖管理
+
+建议使用 `uv` + Python `3.12`。
+
+创建虚拟环境并安装依赖：
+
+```powershell
+uv venv --python 3.12
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+如果你已经创建过 `.venv`，只需要重新安装一次依赖：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+
+### 2.2 MySQL
+
+项目依赖本地 MySQL，默认配置如下：
+
+- host: `localhost`
+- user: `root`
+- password: `123456`
+- database: `travel_rag`
+
+你可以在 `.env` 中修改这些值。
+
+
+## 3. 配置文件
+
+项目使用 `.env` 读取配置，`config.py` 会：
+
+- 优先读取 `.env`
+- 如果 `.env` 不存在，则回退到默认值
+- 在关键配置缺失时给出提示
+
+先复制模板：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+
+## 4. 模型 Provider 配置
+
+### 4.1 openai_compatible
+
+适用于：
+
+- OpenAI 官方 API
+- 阿里 DashScope OpenAI 兼容接口
+- 各类 OpenAI 兼容中转 API
+
+`.env` 示例：
+
+```env
+SMARTVOYAGE_PROVIDER=openai_compatible
+SMARTVOYAGE_MODEL_NAME=qwen-plus
+SMARTVOYAGE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+SMARTVOYAGE_API_KEY=你的真实API_KEY
+
+SMARTVOYAGE_OLLAMA_BASE_URL=http://127.0.0.1:11434
+
+SMARTVOYAGE_DB_HOST=localhost
+SMARTVOYAGE_DB_USER=root
+SMARTVOYAGE_DB_PASSWORD=123456
+SMARTVOYAGE_DB_NAME=travel_rag
+```
+
+你需要重点改这几个字段：
+
+- `SMARTVOYAGE_PROVIDER`
+- `SMARTVOYAGE_MODEL_NAME`
+- `SMARTVOYAGE_BASE_URL`
+- `SMARTVOYAGE_API_KEY`
+
+
+### 4.2 ollama
+
+适用于本地运行模型。
+
+你需要先安装并启动 Ollama，然后拉取一个支持聊天的模型，例如：
+
+```powershell
+ollama pull qwen2.5:7b
+```
+
+`.env` 示例：
+
+```env
+SMARTVOYAGE_PROVIDER=ollama
+SMARTVOYAGE_MODEL_NAME=qwen2.5:7b
+SMARTVOYAGE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+SMARTVOYAGE_API_KEY=
+SMARTVOYAGE_OLLAMA_BASE_URL=http://127.0.0.1:11434
+
+SMARTVOYAGE_DB_HOST=localhost
+SMARTVOYAGE_DB_USER=root
+SMARTVOYAGE_DB_PASSWORD=123456
+SMARTVOYAGE_DB_NAME=travel_rag
+```
+
+你需要重点改这几个字段：
+
+- `SMARTVOYAGE_PROVIDER=ollama`
+- `SMARTVOYAGE_MODEL_NAME`
+- `SMARTVOYAGE_OLLAMA_BASE_URL`
+
+说明：
+
+- `provider=ollama` 时，不依赖 `SMARTVOYAGE_API_KEY`
+- 票务预定这条链路依赖工具调用能力，建议优先选择支持工具调用/结构化输出更稳定的 Ollama 模型
+
+
+## 5. 初始化数据库
+
+第一次运行前，需要先创建库表并导入测试数据。
+
+PowerShell 下执行：
+
+```powershell
+Get-Content sql\create_table.sql | mysql -u root -p123456
+Get-Content sql\insert_data.sql | mysql -u root -p123456
+```
+
+如果你的数据库密码不是 `123456`，请先修改 `.env`。
+
+
+## 6. 启动项目
+
+### 6.1 一键启动全部后端服务
+
+项目根目录提供了一键启动脚本：
+
+```powershell
+.\.venv\Scripts\python.exe run_all.py
+```
+
+这会启动：
+
+- `mcp_ticket_server`
+- `mcp_weather_server`
+- `mcp_order_server`
+- `a2a_ticket_server`
+- `a2a_weather_server`
+- `a2a_order_server`
+
+
+### 6.2 一键启动后端 + 前端
+
+```powershell
+.\.venv\Scripts\python.exe run_all.py --with-ui
+```
+
+这会额外启动：
+
+- `streamlit run app.py`
+
+
+### 6.3 单独启动前端
+
+如果后端已经启动，也可以单独运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run app.py
+```
+
+
+### 6.4 命令行入口
+
+```powershell
+.\.venv\Scripts\python.exe main.py
+```
+
+
+## 7. 测试方式
+
+### 7.1 测试 MCP 订票链路
+
+```powershell
+.\.venv\Scripts\python.exe test\test_order_mcp_server.py
+```
+
+
+### 7.2 测试票务查询 Agent
+
+```powershell
+.\.venv\Scripts\python.exe test\test_ticket_agent_server.py
+```
+
+
+### 7.3 测试天气查询 Agent
+
+```powershell
+.\.venv\Scripts\python.exe test\test_weather_agent_server.py
+```
+
+
+### 7.4 测试票务 MCP
+
+```powershell
+.\.venv\Scripts\python.exe test\test_ticket_mcp_server.py
+```
+
+
+### 7.5 测试天气 MCP
+
+```powershell
+.\.venv\Scripts\python.exe test\test_weather_mcp_server.py
+```
+
+
+## 8. 当前关键配置项说明
+
+### 模型相关
+
+- `SMARTVOYAGE_PROVIDER`
+  - 可选：`openai_compatible` / `ollama`
+- `SMARTVOYAGE_MODEL_NAME`
+  - 当前使用的聊天模型名称
+- `SMARTVOYAGE_BASE_URL`
+  - 仅 `openai_compatible` 使用
+- `SMARTVOYAGE_API_KEY`
+  - 仅 `openai_compatible` 使用
+- `SMARTVOYAGE_OLLAMA_BASE_URL`
+  - 仅 `ollama` 使用
+
+### 数据库相关
+
+- `SMARTVOYAGE_DB_HOST`
+- `SMARTVOYAGE_DB_USER`
+- `SMARTVOYAGE_DB_PASSWORD`
+- `SMARTVOYAGE_DB_NAME`
+
+
+## 9. 代码结构说明
+
+### 模型工厂
+
+统一模型接入在：
+
+- `utils/model_factory.py`
+
+当前通过 `build_chat_model(config)` 根据 `.env` 中的 provider 返回对应模型：
+
+- `openai_compatible` -> `ChatOpenAI`
+- `ollama` -> `ChatOllama`
+
+结构化输出也在同一个文件统一封装：
+
+- `build_structured_llm(...)`
+
+
+### 结构化输出 Schema
+
+定义在：
+
+- `utils/structured_outputs.py`
+
+当前覆盖：
+
+- 意图识别
+- 天气 SQL 生成
+- 票务 SQL 生成
+
+这样做的好处是：
+
+- 不再依赖模型输出固定 JSON 文本
+- 不再依赖手工字符串拆解
+- 模型格式漂移时更容易发现并定位问题
+
+
+## 10. 常见问题
+
+### 10.1 `Unknown database 'travel_rag'`
+
+说明数据库还没初始化。执行第 5 节的 SQL 导入步骤。
+
+
+### 10.2 `Incorrect API key provided`
+
+说明 `openai_compatible` 模式下的 `SMARTVOYAGE_API_KEY` 无效。  
+检查 `.env` 并重启所有服务。
+
+
+### 10.3 运行测试时提示无法连接 `8001/8002/8003/5005/5006/5007`
+
+说明后端服务没有启动。先执行：
+
+```powershell
+.\.venv\Scripts\python.exe run_all.py
+```
+
+
+### 10.4 切换 provider 后不生效
+
+模型实例在服务启动时创建。  
+修改 `.env` 后需要重启后端服务。
+
+
+### 10.5 使用 Ollama 时报模型不存在
+
+先确认本地模型已拉取：
+
+```powershell
+ollama list
+```
+
+如果没有，先：
+
+```powershell
+ollama pull 你的模型名
+```
+
+
+## 11. 推荐使用顺序
+
+第一次运行建议按这个顺序：
+
+1. 创建并激活虚拟环境
+2. 安装依赖
+3. 配置 `.env`
+4. 初始化 MySQL 数据库
+5. 运行 `run_all.py --with-ui`
+6. 在前端或测试脚本中验证链路
+
+
+## 12. 还需要改进的地方（主要以改进多智能体这个方向）
+
+1. 把“多智能体为什么存在”做得更清楚。
+现在项目里是天气查询、票务查询、票务预定三个 Agent，但更像功能拆分，不够像“协作系统”。建议补一个更完整的跨 Agent 场景，比如“根据天气推荐出行方式并查询票，再完成预定”，让 Agent 之间有明确的协商和依赖，而不只是路由。
+
+2.做失败恢复和降级。
+多智能体项目最能体现水平的，不是 happy path，而是异常路径。建议补：
+
+某个 Agent 超时后的 fallback
+MCP 不可用时的兜底回复
+结构化输出失败时重试
+模型不可用时切换备用 provider
+这比单纯“能运行”更像真实系统。
+
+3. 增加评测和用例集。
+建议做一组固定测试数据，覆盖：
+单意图
+多意图
+多轮追问
+歧义输入
+工具失败
+结构化输出失败
+
+然后给出命中率/成功率。
+LangSmith 很适合做这件事。做法不是“直接评整个项目”，而是先把你要测的能力拆成一个可评测的 target 函数，再喂一组固定 dataset，用自定义 evaluator 打分。
