@@ -6,11 +6,26 @@ CREATE TABLE users (
     id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键，自增，唯一标识用户',
     username VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '用户名',
     phone VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '手机号',
-    default_departure_city VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '默认出发城市',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     UNIQUE KEY unique_username (username),
     UNIQUE KEY unique_phone (phone)
 ) COMMENT='用户表';
+
+CREATE TABLE user_preferences (
+    id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键，自增，唯一标识偏好记录',
+    user_id INT NOT NULL COMMENT '用户ID',
+    home_city VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '常住地城市，仅用于追问候选，不做自动补全',
+    transport_preference ENUM('train', 'flight', 'balanced') NOT NULL DEFAULT 'balanced' COMMENT '交通偏好',
+    seat_preference VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '高铁席位偏好',
+    cabin_preference VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '机票舱位偏好',
+    budget_level ENUM('low', 'medium', 'high') NOT NULL DEFAULT 'medium' COMMENT '预算偏好',
+    prefer_direct BOOLEAN NOT NULL DEFAULT TRUE COMMENT '是否偏好直达',
+    prefer_morning_departure BOOLEAN NOT NULL DEFAULT FALSE COMMENT '是否偏好上午出发',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    UNIQUE KEY unique_user_preferences (user_id),
+    CONSTRAINT fk_user_preferences_user FOREIGN KEY (user_id) REFERENCES users(id)
+) COMMENT='用户偏好画像表';
 
 CREATE TABLE train_tickets (
     id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键，自增，唯一标识每条记录',

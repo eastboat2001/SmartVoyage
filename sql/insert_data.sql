@@ -1,9 +1,15 @@
 USE travel_rag;
 
 INSERT INTO users (
-    id, username, phone, default_departure_city, created_at
+    id, username, phone, created_at
 ) VALUES
-(1, 'demo_user', '13800000000', '北京', '2026-03-20 08:00:00');
+(1, 'demo_user', '13800000000', '2026-03-20 08:00:00');
+
+INSERT INTO user_preferences (
+    id, user_id, home_city, transport_preference, seat_preference, cabin_preference,
+    budget_level, prefer_direct, prefer_morning_departure, created_at, updated_at
+) VALUES
+(1, 1, '北京', 'train', '二等座', '经济舱', 'medium', TRUE, TRUE, '2026-03-20 08:00:00', '2026-03-20 08:00:00');
 
 INSERT INTO weather_data (
     id, city, fx_date, sunrise, sunset, moonrise, moonset, moon_phase, moon_phase_icon,

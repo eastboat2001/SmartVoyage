@@ -94,7 +94,6 @@ class Config:
         self.database = _first_env("SMARTVOYAGE_DB_NAME", "MYSQL_DATABASE", default="travel_rag")
         self.default_username = _first_env("SMARTVOYAGE_DEFAULT_USERNAME", default="demo_user")
         self.default_user_phone = _first_env("SMARTVOYAGE_DEFAULT_USER_PHONE", default="13800000000")
-        self.default_departure_city = _first_env("SMARTVOYAGE_DEFAULT_DEPARTURE_CITY", default="北京")
 
         # 日志配置
         self.log_file = _first_env(

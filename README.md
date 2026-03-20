@@ -33,6 +33,10 @@ SmartVoyage 是一个基于 A2A + MCP + LangGraph 的旅行助手示例项目，
   - 已支持改签
   - 已支持订单状态流转与库存回补/扣减
   - 退票/改签已改为 `LLM 结构化抽取 + 后端强校验 + 会话级轻量补参`
+- 已完成 P3 的第一版最小落地
+  - 已新增 `user_preferences`
+  - 已支持读取用户偏好画像参与 `travel_plan` 出行推荐
+  - 已支持使用 `home_city` 作为追问候选，但不会自动补全查询条件或自动下单
 - 当前支持两种模型提供方式：
   - `openai_compatible`
   - `ollama`
@@ -123,11 +127,13 @@ SmartVoyage 是一个基于 A2A + MCP + LangGraph 的旅行助手示例项目，
   - 退票
   - 改签
   - 退票/改签缺字段时的多轮补参
+  - 基于用户偏好的 `travel_plan` 个性化推荐
+  - 出发地缺失时，基于 `home_city` 的确认性追问
 - 当前尚未支持：
   - 登录/切换用户
-  - 用户偏好画像
   - 酒店订单
   - 模糊改签（如“改签到下午”）
+  - 完整持久化的用户画像采集与维护流程
 
 ### `test/`
 
@@ -157,7 +163,7 @@ SmartVoyage 是一个基于 A2A + MCP + LangGraph 的旅行助手示例项目，
   - 根据 `provider` 创建 `ChatOpenAI` 或 `ChatOllama`，并提供结构化输出包装和订票 Agent 构造。
 - `utils/structured_outputs.py`
   - 结构化输出 Schema。
-  - 定义意图识别、天气 SQL、票务 SQL 的 Pydantic 模型。
+  - 定义意图识别、天气 SQL、票务 SQL、出行规划等 Pydantic 模型。
 - `utils/format.py`
   - 数据格式化工具。
   - 主要用于日期、时间、Decimal 等对象的 JSON 序列化。
@@ -549,8 +555,11 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
 
 - 对 `travel_plan` 意图做真正的跨 Agent 协作
   - 先查天气
-  - 再基于天气决策高铁或飞机
+  - 再基于天气和用户偏好画像决策高铁或飞机
   - 然后继续查票，必要时继续订票
+- 当用户未明确出发地但画像里存在 `home_city` 时
+  - 会先做确认性追问
+  - 不会直接把 `home_city` 自动补全进查询或下单参数
 - 对 Agent 调用增加超时控制
 - 对结构化输出增加重试
 - 对模型调用支持 fallback provider

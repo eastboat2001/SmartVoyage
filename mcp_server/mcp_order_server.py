@@ -595,10 +595,10 @@ class OrderService:
             return int(row["id"])
         cursor.execute(
             """
-            INSERT INTO users (username, phone, default_departure_city)
-            VALUES (%s, %s, %s)
+            INSERT INTO users (username, phone)
+            VALUES (%s, %s)
             """,
-            (username, self._phone_for_username(username), self.config.default_departure_city),
+            (username, self._phone_for_username(username)),
         )
         return int(cursor.lastrowid)
 

@@ -38,6 +38,34 @@ class AgentExecutionResult:
     pending_order_context: dict | None = None
 
 
+@dataclass
+class UserPreferenceProfile:
+    username: str
+    home_city: str = ""
+    transport_preference: str = "balanced"
+    seat_preference: str = ""
+    cabin_preference: str = ""
+    budget_level: str = "medium"
+    prefer_direct: bool = True
+    prefer_morning_departure: bool = False
+
+    def summary_text(self) -> str:
+        parts: list[str] = []
+        if self.home_city:
+            parts.append(f"常住地：{self.home_city}")
+        transport_map = {"train": "偏好高铁", "flight": "偏好飞机", "balanced": "交通方式平衡"}
+        parts.append(transport_map.get(self.transport_preference, "交通方式平衡"))
+        if self.seat_preference:
+            parts.append(f"高铁席位偏好：{self.seat_preference}")
+        if self.cabin_preference:
+            parts.append(f"机票舱位偏好：{self.cabin_preference}")
+        budget_map = {"low": "预算敏感", "medium": "预算中等", "high": "预算充裕"}
+        parts.append(budget_map.get(self.budget_level, "预算中等"))
+        parts.append("偏好直达" if self.prefer_direct else "可接受中转")
+        parts.append("偏好上午出发" if self.prefer_morning_departure else "出发时间无明显偏好")
+        return "；".join(parts)
+
+
 class SmartVoyageOrchestrator:
     def __init__(self, config: Config):
         self.config = config
@@ -45,6 +73,52 @@ class SmartVoyageOrchestrator:
         self.agent_urls = dict(DEFAULT_AGENT_URLS)
         self.agent_network = self._build_network()
         self.current_username = config.default_username
+
+    def _load_user_preferences(self) -> UserPreferenceProfile:
+        conn = None
+        cursor = None
+        try:
+            conn = get_db_connection(self.config)
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT
+                    u.username,
+                    p.home_city,
+                    p.transport_preference,
+                    p.seat_preference,
+                    p.cabin_preference,
+                    p.budget_level,
+                    p.prefer_direct,
+                    p.prefer_morning_departure
+                FROM users u
+                LEFT JOIN user_preferences p ON p.user_id = u.id
+                WHERE u.username = %s
+                LIMIT 1
+                """,
+                (self.current_username,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return UserPreferenceProfile(username=self.current_username)
+            return UserPreferenceProfile(
+                username=row.get("username") or self.current_username,
+                home_city=row.get("home_city") or "",
+                transport_preference=row.get("transport_preference") or "balanced",
+                seat_preference=row.get("seat_preference") or "",
+                cabin_preference=row.get("cabin_preference") or "",
+                budget_level=row.get("budget_level") or "medium",
+                prefer_direct=bool(row.get("prefer_direct")) if row.get("prefer_direct") is not None else True,
+                prefer_morning_departure=bool(row.get("prefer_morning_departure")) if row.get("prefer_morning_departure") is not None else False,
+            )
+        except Exception as exc:
+            logger.warning(f"读取用户偏好失败: {exc}")
+            return UserPreferenceProfile(username=self.current_username)
+        finally:
+            if cursor is not None:
+                cursor.close()
+            if conn is not None and conn.is_connected():
+                conn.close()
 
     def _build_network(self) -> AgentNetwork:
         network = AgentNetwork(name="Travel Assistant Network")
@@ -73,6 +147,16 @@ class SmartVoyageOrchestrator:
         conversation_history: str,
         pending_order_context: dict | None = None,
     ) -> dict:
+        user_profile = self._load_user_preferences()
+        precheck_follow_up = self._precheck_home_city_follow_up(prompt, user_profile)
+        if precheck_follow_up:
+            return {
+                "response": precheck_follow_up,
+                "intents": [],
+                "routed_agents": [],
+                "pending_order_context": pending_order_context or {},
+            }
+
         intents, user_queries, follow_up_message = self.recognize_intent(
             prompt,
             conversation_history,
@@ -103,8 +187,17 @@ class SmartVoyageOrchestrator:
                 "pending_order_context": pending_order_context,
             }
 
+        home_city_follow_up = self._maybe_follow_up_with_home_city(intents, user_queries, user_profile)
+        if home_city_follow_up:
+            return {
+                "response": home_city_follow_up,
+                "intents": intents,
+                "routed_agents": [],
+                "pending_order_context": pending_order_context,
+            }
+
         if "travel_plan" in intents:
-            result = self._handle_travel_plan(prompt, conversation_history, user_queries, intents)
+            result = self._handle_travel_plan(prompt, conversation_history, user_queries, intents, user_profile)
             result["pending_order_context"] = {}
             return result
 
@@ -153,6 +246,7 @@ class SmartVoyageOrchestrator:
         conversation_history: str,
         user_queries: dict[str, str],
         intents: list[str],
+        user_profile: UserPreferenceProfile,
     ) -> dict:
         weather_query = user_queries.get("weather", prompt)
         travel_query = user_queries.get("travel_plan", prompt)
@@ -178,6 +272,7 @@ class SmartVoyageOrchestrator:
             {
                 "query": travel_query,
                 "weather_result": weather_text,
+                "user_preferences": user_profile.summary_text(),
                 "current_date": datetime.now(pytz.timezone("Asia/Shanghai")).strftime("%Y-%m-%d"),
             },
             description="跨 Agent 出行规划",
@@ -226,6 +321,49 @@ class SmartVoyageOrchestrator:
             "intents": intents,
             "routed_agents": routed_agents,
         }
+
+    def _maybe_follow_up_with_home_city(
+        self,
+        intents: list[str],
+        user_queries: dict[str, str],
+        user_profile: UserPreferenceProfile,
+    ) -> str:
+        if not user_profile.home_city:
+            return ""
+
+        target_intent = next((intent for intent in intents if intent in {"flight", "train", "order", "travel_plan"}), "")
+        if not target_intent:
+            return ""
+
+        query = user_queries.get(target_intent, "")
+        if not query:
+            return ""
+        if self._has_explicit_departure_city(query):
+            return ""
+        if not self._looks_like_ticket_or_travel_query(query):
+            return ""
+        return (
+            f"你这次是从{user_profile.home_city}出发吗？"
+            f"如果按你的常住地{user_profile.home_city}出发，我可以继续帮你查票或做出行建议。"
+        )
+
+    def _precheck_home_city_follow_up(self, prompt: str, user_profile: UserPreferenceProfile) -> str:
+        if not user_profile.home_city:
+            return ""
+        normalized = prompt.strip()
+        if not normalized:
+            return ""
+        if self._has_explicit_departure_city(normalized):
+            return ""
+        if not self._looks_like_ticket_or_travel_query(normalized):
+            return ""
+        if not self._looks_like_missing_departure_query(normalized):
+            return ""
+        return (
+            f"你这次是从{user_profile.home_city}出发吗？"
+            f"如果按你的常住地{user_profile.home_city}出发，我可以继续帮你查高铁票和机票；"
+            "如果不是，请直接告诉我出发城市。"
+        )
 
     def _finalize_agent_response(
         self,
@@ -425,6 +563,44 @@ class SmartVoyageOrchestrator:
         if order_context:
             response += order_context
         return response
+
+    @staticmethod
+    def _has_explicit_departure_city(query: str) -> bool:
+        normalized = query.replace("当前用户：", "")
+        patterns = [
+            r"从[\u4e00-\u9fa5]{2,10}到[\u4e00-\u9fa5]{2,10}",
+            r"[\u4e00-\u9fa5]{2,10}到[\u4e00-\u9fa5]{2,10}",
+            r"从[\u4e00-\u9fa5]{2,10}去[\u4e00-\u9fa5]{2,10}",
+            r"[\u4e00-\u9fa5]{2,10}飞[\u4e00-\u9fa5]{2,10}",
+        ]
+        return any(re.search(pattern, normalized) for pattern in patterns)
+
+    @staticmethod
+    def _looks_like_ticket_or_travel_query(query: str) -> bool:
+        keywords = (
+            "票",
+            "高铁",
+            "火车",
+            "机票",
+            "航班",
+            "飞机",
+            "出发",
+            "去",
+            "坐高铁",
+            "坐飞机",
+        )
+        return any(keyword in query for keyword in keywords)
+
+    @staticmethod
+    def _looks_like_missing_departure_query(query: str) -> bool:
+        normalized = query.replace("当前用户：", "")
+        missing_departure_patterns = [
+            r"去[\u4e00-\u9fa5]{2,10}的?(高铁票|火车票|机票|票)",
+            r"到[\u4e00-\u9fa5]{2,10}的?(高铁票|火车票|机票|票)",
+            r"去[\u4e00-\u9fa5]{2,10}(坐高铁|坐飞机|怎么去|的票)",
+            r"到[\u4e00-\u9fa5]{2,10}(坐高铁|坐飞机|的票)",
+        ]
+        return any(re.search(pattern, normalized) for pattern in missing_departure_patterns)
 
     def _related_order_context(self, *, departure_time: str, transport_no: str, ticket_type: str) -> str:
         conn = None
