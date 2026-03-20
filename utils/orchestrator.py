@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,6 +12,7 @@ from python_a2a import AgentNetwork, Message, MessageRole, Task, TextContent
 from config import Config
 from create_logger import logger
 from main_prompts import SmartVoyagePrompts
+from utils.db import get_db_connection
 from utils.resilient_llm import ResilientModelInvoker
 from utils.structured_outputs import (
     IntentRecognitionResult,
@@ -40,6 +42,7 @@ class SmartVoyageOrchestrator:
         self.invoker = ResilientModelInvoker(config)
         self.agent_urls = dict(DEFAULT_AGENT_URLS)
         self.agent_network = self._build_network()
+        self.current_username = config.default_username
 
     def _build_network(self) -> AgentNetwork:
         network = AgentNetwork(name="Travel Assistant Network")
@@ -96,6 +99,7 @@ class SmartVoyageOrchestrator:
                 continue
 
             query_str = user_queries.get(intent, prompt)
+            query_str = self._with_user_context(intent, query_str)
             result = self._call_agent(agent_name, query_str, conversation_history)
             routed_agents.append(agent_name)
             responses.append(self._finalize_agent_response(agent_name, query_str, result))
@@ -162,6 +166,7 @@ class SmartVoyageOrchestrator:
                     transport_mode=plan.transport_mode,
                     ticket_result_text=ticket_result.text,
                 )
+                order_query = self._with_user_context("order", order_query)
                 order_result = self._call_agent(
                     "TicketOrderAssistant",
                     order_query,
@@ -202,6 +207,9 @@ class SmartVoyageOrchestrator:
             )
 
         if agent_name == "TicketQueryAssistant":
+            direct_response = self._build_ticket_fact_response(query_str, result.text)
+            if direct_response:
+                return direct_response
             return self.invoker.invoke_text(
                 SmartVoyagePrompts.summarize_ticket_prompt(),
                 {"query": query_str, "raw_response": result.text},
@@ -284,11 +292,90 @@ class SmartVoyageOrchestrator:
     def _agent_name_for_intent(intent: str) -> str | None:
         if intent == "weather":
             return "WeatherQueryAssistant"
-        if intent in {"flight", "train", "concert"}:
+        if intent in {"flight", "train"}:
             return "TicketQueryAssistant"
-        if intent == "order":
+        if intent in {"order", "my_orders"}:
             return "TicketOrderAssistant"
         return None
+
+    def _with_user_context(self, intent: str, query: str) -> str:
+        if intent not in {"order", "my_orders"}:
+            return query
+        if "当前用户" in query:
+            return query
+        return f"当前用户：{self.current_username}\n{query}"
+
+    def _build_ticket_fact_response(self, query_str: str, raw_text: str) -> str:
+        normalized_query = query_str.replace("当前用户：", "")
+        is_inventory_query = any(keyword in normalized_query for keyword in ("余票", "还有多少", "多少张", "剩余"))
+        if not is_inventory_query:
+            return ""
+
+        first_line = next((line.strip() for line in raw_text.splitlines() if line.strip()), "")
+        if not first_line:
+            return raw_text
+
+        train_match = re.search(
+            r"(?P<departure>\S+)\s+到\s+(?P<arrival>\S+)\s+(?P<departure_time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}): "
+            r"车次\s+(?P<transport_no>\S+)，(?P<ticket_type>[^，]+)，票价\s+(?P<price>[\d.]+)元，剩余\s+(?P<remaining>\d+)\s+张",
+            first_line,
+        )
+        flight_match = re.search(
+            r"(?P<departure>\S+)\s+到\s+(?P<arrival>\S+)\s+(?P<departure_time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}): "
+            r"航班\s+(?P<transport_no>\S+)，(?P<ticket_type>[^，]+)，票价\s+(?P<price>[\d.]+)元，剩余\s+(?P<remaining>\d+)\s+张",
+            first_line,
+        )
+        match = train_match or flight_match
+        if not match:
+            return raw_text
+
+        info = match.groupdict()
+        response = (
+            f"{info['departure_time']} {info['departure']}到{info['arrival']} "
+            f"{info['transport_no']} {info['ticket_type']}当前剩余 {info['remaining']} 张，"
+            f"票价 {info['price']} 元。"
+        )
+        order_context = self._related_order_context(
+            departure_time=info["departure_time"],
+            transport_no=info["transport_no"],
+            ticket_type=info["ticket_type"],
+        )
+        if order_context:
+            response += order_context
+        return response
+
+    def _related_order_context(self, *, departure_time: str, transport_no: str, ticket_type: str) -> str:
+        conn = None
+        cursor = None
+        try:
+            conn = get_db_connection(self.config)
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT quantity
+                FROM orders o
+                JOIN users u ON u.id = o.user_id
+                WHERE u.username = %s
+                  AND o.status = 'booked'
+                  AND o.departure_time = %s
+                  AND o.transport_no = %s
+                  AND o.ticket_or_room_type = %s
+                LIMIT 1
+                """,
+                (self.current_username, departure_time, transport_no, ticket_type),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return ""
+            return f" 你当前已预订该车次/航班 {row['quantity']} 张。"
+        except Exception as exc:
+            logger.warning(f"读取用户订单上下文失败: {exc}")
+            return ""
+        finally:
+            if cursor is not None:
+                cursor.close()
+            if conn is not None and conn.is_connected():
+                conn.close()
 
     @staticmethod
     def _transport_label(transport_mode: str) -> str:

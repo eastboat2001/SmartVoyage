@@ -7,8 +7,8 @@ SupportedIntent = Literal[
     "weather",
     "flight",
     "train",
-    "concert",
     "order",
+    "my_orders",
     "travel_plan",
     "attraction",
     "out_of_scope",
@@ -53,7 +53,7 @@ class WeatherSqlResult(BaseModel):
 
 class TicketSqlResult(BaseModel):
     status: Literal["sql", "input_required"]
-    type: Literal["train", "flight", "concert"] | None = None
+    type: Literal["train", "flight"] | None = None
     sql: str = ""
     message: str = ""
 

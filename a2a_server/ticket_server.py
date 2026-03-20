@@ -62,37 +62,20 @@ CREATE TABLE flight_tickets (
     UNIQUE KEY unique_flight (departure_time, flight_number)
 ) COMMENT='航班机票信息表';
 
--- 演唱会票表
-CREATE TABLE concert_tickets (
-    id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键，自增，唯一标识每条记录',
-    artist VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '艺人名称（如“周杰伦”）',
-    city VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '举办城市（如“上海”）',
-    venue VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '场馆（如“上海体育场”）',
-    start_time DATETIME NOT NULL COMMENT '开始时间（如“2025-08-12 19:00:00”）',
-    end_time DATETIME NOT NULL COMMENT '结束时间（如“2025-08-12 22:00:00”）',
-    ticket_type VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '票类型（如“VIP”）',
-    total_seats INT NOT NULL COMMENT '总座位数（如 5000）',
-    remaining_seats INT NOT NULL COMMENT '剩余座位数（如 100）',
-    price DECIMAL(10, 2) NOT NULL COMMENT '票价（如 880.00）',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间，自动记录插入时间',
-    UNIQUE KEY unique_concert (start_time, artist, ticket_type)
-) COMMENT='演唱会门票信息表';
 """
 
 # 生成SQL的提示词
 sql_prompt = ChatPromptTemplate.from_template(
     """
-系统提示：你是一个专业的票务SQL生成器，需要从对话历史（含用户的问题）中提取用户的意图以及关键信息，然后基于train_tickets、flight_tickets、concert_tickets表生成SELECT语句。
+系统提示：你是一个专业的票务SQL生成器，需要从对话历史（含用户的问题）中提取用户的意图以及关键信息，然后基于train_tickets、flight_tickets表生成SELECT语句。
 根据对话历史：
-1. 提取用户的意图，意图有3种（train: 火车/高铁, flight: 机票, concert: 演唱会）。
+1. 提取用户的意图，意图有2种（train: 火车/高铁, flight: 机票）。
 2. 根据用户的意图，生成对应表的 SELECT 语句，仅查询指定字段：
 - train_tickets: id, departure_city, arrival_city, departure_time, arrival_time, train_number, seat_type, price, remaining_seats
 - flight_tickets: id, departure_city, arrival_city, departure_time, arrival_time, flight_number, cabin_type, price, remaining_seats
-- concert_tickets: id, artist, city, venue, start_time, end_time, ticket_type, price, remaining_seats
 3. 如果用户在查询票务信息时，缺少必要信息，则返回 status='input_required' 并填写 message；如果对话历史中信息齐全，则返回 status='sql'、type 和 sql。
 其中，每种意图必要的信息有：
 - flight/train: 【departure_city (出发城市), arrival_city (到达城市), date (日期)】 或 【train_number/flight_number (车次)】
-- concert: city (城市), artist (艺人), date (日期)。
 4. 只返回符合结构化 schema 的字段值，不要输出 markdown 代码块，不要补充解释。
 
 表结构：{table_schema_string}
@@ -133,8 +116,7 @@ agent_card = AgentCard(
         AgentSkill(
             name="execute ticket query",
             description="根据客户端提供的输入执行票务查询，返回数据库结果，支持自然语言输入",
-            examples=["火车票 北京 上海 2025-07-31 硬卧", "机票 北京 上海 2025-07-31 经济舱",
-                      "演唱会 北京 刀郎 2025-08-23 看台"]
+            examples=["火车票 北京 上海 2026-03-21 二等座", "机票 北京 上海 2026-03-21 经济舱"]
         )
     ]
 )
@@ -200,8 +182,6 @@ class TicketQueryServer(A2AServer):
                         response_text += f"{d['departure_city']} 到 {d['arrival_city']} {d['departure_time']}: 车次 {d['train_number']}，{d['seat_type']}，票价 {d['price']}元，剩余 {d['remaining_seats']} 张\n"  # 格式化火车票文本
                     elif query_type == "flight":  # 机票类型
                         response_text += f"{d['departure_city']} 到 {d['arrival_city']} {d['departure_time']}: 航班 {d['flight_number']}，{d['cabin_type']}，票价 {d['price']}元，剩余 {d['remaining_seats']} 张\n"  # 格式化机票文本
-                    elif query_type == "concert":  # 演唱会类型
-                        response_text += f"{d['city']} {d['start_time']}: {d['artist']} 演唱会，{d['ticket_type']}，场地 {d['venue']}，票价 {d['price']}元，剩余 {d['remaining_seats']} 张\n"  # 格式化演唱会文本
                 if not response_text:  # 检查文本是否为空
                     response_text = "无结果。如果需要其他日期，请补充。"
 

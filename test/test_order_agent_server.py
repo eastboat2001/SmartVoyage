@@ -58,4 +58,6 @@ def main():
 
 if __name__ == "__main__":
     print("票务预定agent server查询客户端测试脚本")
+    print("示例：当前用户：demo_user\\n帮我预订2026-03-21北京到上海的高铁票，二等座1张")
+    print("示例：当前用户：demo_user\\n查询我的订单")
     main()

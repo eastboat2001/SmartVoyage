@@ -72,6 +72,7 @@ if "agent_network" not in st.session_state:
 # 主界面布局
 st.title("🤖 基于A2A的SmartVoyage旅行智能助手")
 st.markdown("欢迎体验智能对话！输入问题，系统将精准识别意图并提供服务。")
+st.caption(f"当前演示用户：{conf.default_username}")
 
 # 两栏布局：左侧对话，右侧 Agent Card
 col1, col2 = st.columns([2, 1])

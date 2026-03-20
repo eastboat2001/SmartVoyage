@@ -1,5 +1,5 @@
 """
-mcp_ticket_server.py：票务 MCP 服务器，提供 train_tickets、flight_tickets 和 concert_tickets 表的 SELECT 查询接口，返回 JSON 格式结果。
+mcp_ticket_server.py：票务 MCP 服务器，提供 train_tickets 和 flight_tickets 表的 SELECT 查询接口，返回 JSON 格式结果。
 
 核心功能：
     初始化 MySQL 数据库连接。
@@ -9,7 +9,6 @@ mcp_ticket_server.py：票务 MCP 服务器，提供 train_tickets、flight_tick
 """
 import os
 import sys
-import mysql.connector
 import json
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -20,31 +19,25 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
 from create_logger import logger
 from utils.format import DateEncoder, default_encoder
+from utils.db import get_db_connection
 
 conf = Config()
 
 
 # 票务服务类
 class TicketService:  # 定义票务服务类，封装数据库操作逻辑
-    def __init__(self):  # 初始化方法，建立数据库连接
-        # 连接数据库
-        self.conn = mysql.connector.connect(
-            host=conf.host,
-            user=conf.user,
-            password=conf.password,
-            database=conf.database
-        )
-
     # 定义执行SQL查询方法，输入SQL字符串，返回JSON字符串
     def execute_query(self, sql: str) -> str:
+        conn = None
+        cursor = None
         try:
+            conn = get_db_connection(conf)
             # 执行SQL查询
-            cursor = self.conn.cursor(dictionary=True)
+            cursor = conn.cursor(dictionary=True)
             # 执行查询
             cursor.execute(sql)
             # 获取查询结果
             results = cursor.fetchall()
-            cursor.close()
             # 格式化结果
             for result in results:  # 遍历每个结果字典
                 for key, value in result.items():
@@ -58,12 +51,17 @@ class TicketService:  # 定义票务服务类，封装数据库操作逻辑
             logger.error(f"票务查询错误: {str(e)}")
             # 返回错误JSON响应
             return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+        finally:
+            if cursor is not None:
+                cursor.close()
+            if conn is not None and conn.is_connected():
+                conn.close()
 
 # 创建票务MCP服务器
 def create_ticket_mcp_server():
     # 创建FastMCP实例
     ticket_mcp = FastMCP(name="TicketTools",
-                         instructions="票务查询工具，基于 train_tickets, flight_tickets, concert_tickets 表。只支持查询。",
+                         instructions="票务查询工具，基于 train_tickets, flight_tickets 表。只支持查询。",
                          log_level="ERROR",
                          host="127.0.0.1", port=8001)
 

@@ -9,8 +9,8 @@ class SmartVoyagePrompts:
         return ChatPromptTemplate.from_template(
 """
 系统提示：您是一个专业的旅行意图识别专家，基于用户查询和对话历史，识别其意图，用于调用专门的agent server来执行；为方便后续的agent server处理，可以基于对话历史对用户查询进行改写，使问题更明确。严格遵守规则：
-- 支持意图：['weather' (天气查询), 'flight' (机票查询), 'train' (高铁/火车票查询), 'concert' (演唱会票查询), 'order' (票务预定), 'travel_plan' (基于天气/行程综合推荐出行方式并继续查票或订票), 'attraction' (景点推荐)] 或其组合（如 ['weather', 'flight']）。如果意图超出范围，返回意图 'out_of_scope'。
-- 注意票务预定和票务查询要区分开，涉及到订票时则为order，只是查询则为flight、train或concert。
+- 支持意图：['weather' (天气查询), 'flight' (机票查询), 'train' (高铁/火车票查询), 'order' (交通票务预定), 'my_orders' (查询我的订单), 'travel_plan' (基于天气/行程综合推荐出行方式并继续查票或订票), 'attraction' (景点推荐)] 或其组合（如 ['weather', 'flight']）。如果意图超出范围，返回意图 'out_of_scope'。
+- 注意票务预定、票务查询、订单查询要区分开，涉及到下单时则为order，只是查询交通票则为flight/train，查询“我的订单/我订了哪些票”时则为my_orders。
 - 如果用户明确表达“根据天气推荐坐高铁还是飞机、再帮我查票/订票”这类跨 Agent 协作需求，优先识别为 travel_plan。识别为 travel_plan 时：
   1. user_queries['travel_plan'] 写整合后的规划请求；
   2. 如果需要先查天气，再额外补充 user_queries['weather']，供天气 agent 使用；
@@ -24,6 +24,7 @@ class SmartVoyagePrompts:
 {{"intents": ["weather"], "user_queries": {{"weather": "今天北京天气如何"}}, "follow_up_message": ""}}
 {{"intents": ["weather"], "user_queries": {{}}, "follow_up_message": "你问的是今天北京天气状况吗"}}
 {{"intents": ["weather", "flight"], "user_queries": {{"weather": "今天北京天气如何", "flight": "查询一下10月28日，从北京飞往杭州的机票"}}, "follow_up_message": ""}}
+{{"intents": ["my_orders"], "user_queries": {{"my_orders": "查询我的订单"}}, "follow_up_message": ""}}
 {{"intents": ["travel_plan"], "user_queries": {{"travel_plan": "根据杭州明天的天气，帮我判断从北京去杭州更适合坐高铁还是飞机，并查询对应票务", "weather": "查询杭州明天的天气"}}, "follow_up_message": ""}}
 {{"intents": ["out_of_scope"], "user_queries": {{}}, "follow_up_message": "你好，我是智能旅行助手，欢迎您向我提问"}}
 

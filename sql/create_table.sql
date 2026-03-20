@@ -2,6 +2,16 @@ DROP DATABASE IF EXISTS travel_rag;
 CREATE DATABASE travel_rag CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE travel_rag;
 
+CREATE TABLE users (
+    id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键，自增，唯一标识用户',
+    username VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '用户名',
+    phone VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '手机号',
+    default_departure_city VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL COMMENT '默认出发城市',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    UNIQUE KEY unique_username (username),
+    UNIQUE KEY unique_phone (phone)
+) COMMENT='用户表';
+
 CREATE TABLE train_tickets (
     id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键，自增，唯一标识每条记录',
     departure_city VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '出发城市（如“北京”）',
@@ -32,21 +42,26 @@ CREATE TABLE flight_tickets (
     UNIQUE KEY unique_flight (departure_time, flight_number) -- 唯一约束，确保同一时间和航班号不重复
 ) COMMENT='航班机票信息表';
 
-
-CREATE TABLE concert_tickets (
-    id INT AUTO_INCREMENT PRIMARY KEY, -- 主键，自增，唯一标识每条记录
-    artist VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL, -- 艺人名称（如“周杰伦”）
-    city VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL, -- 举办城市（如“上海”）
-    venue VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL, -- 场馆（如“上海体育场”）
-    start_time DATETIME NOT NULL, -- 开始时间（如“2025-08-12 19:00:00”）
-    end_time DATETIME NOT NULL, -- 结束时间（如“2025-08-12 22:00:00”）
-    ticket_type VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL, -- 票类型（如“VIP”）
-    total_seats INT NOT NULL, -- 总座位数（如 5000）
-    remaining_seats INT NOT NULL, -- 剩余座位数（如 100）
-    price DECIMAL(10, 2) NOT NULL, -- 票价（如 880.00）
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, -- 创建时间，自动记录插入时间
-    UNIQUE KEY unique_concert (start_time, artist, ticket_type) -- 唯一约束，确保同一时间、艺人和票类型不重复
-);
+CREATE TABLE orders (
+    id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键，自增，唯一标识订单',
+    user_id INT NOT NULL COMMENT '用户ID',
+    order_type ENUM('train', 'flight') NOT NULL COMMENT '订单类型',
+    status ENUM('booked', 'changed', 'cancelled') NOT NULL DEFAULT 'booked' COMMENT '订单状态',
+    departure_city VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '出发城市',
+    arrival_city VARCHAR(50) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '到达城市',
+    departure_time DATETIME NOT NULL COMMENT '出发时间',
+    ticket_or_room_type VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '座位/舱位类型',
+    transport_no VARCHAR(20) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '车次/航班号',
+    quantity INT NOT NULL COMMENT '数量',
+    unit_price DECIMAL(10, 2) NOT NULL COMMENT '单价',
+    total_price DECIMAL(10, 2) NOT NULL COMMENT '总价',
+    raw_order_payload JSON DEFAULT NULL COMMENT '落库原始订单载荷',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    INDEX idx_orders_user_status (user_id, status),
+    INDEX idx_orders_trip (user_id, order_type, departure_time, transport_no),
+    CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users(id)
+) COMMENT='订单表';
 
 DROP TABLE IF EXISTS weather_data;
 CREATE TABLE IF NOT EXISTS weather_data (

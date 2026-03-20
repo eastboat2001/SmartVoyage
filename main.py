@@ -85,6 +85,7 @@ if __name__ == "__main__":
     initialize_system()
     print("🤖 基于A2A的SmartVoyage旅行智能助手")
     print("欢迎体验智能对话！输入问题，按回车提交；输入'quit'退出；输入'cards'查看代理卡片。")
+    print(f"当前演示用户：{conf.default_username}")
 
     # 显示初始代理卡片
     display_agent_cards()
