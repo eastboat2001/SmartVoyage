@@ -46,6 +46,7 @@ jsonpointer==3.0.0
 jsonschema==4.25.0
 jsonschema-specifications==2025.4.1
 langchain>=1.0.0,<2.0.0
+langgraph>=1.0.0,<2.0.0
 langchain-core>=1.0.0,<2.0.0
 langchain-openai>=1.0.0,<2.0.0
 langchain-ollama>=1.0.0,<2.0.0

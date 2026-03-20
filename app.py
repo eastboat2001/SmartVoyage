@@ -68,6 +68,8 @@ if "agent_network" not in st.session_state:
     st.session_state.agent_network = orchestrator.agent_network
     st.session_state.orchestrator = orchestrator
     st.session_state.conversation_history = ""
+if "pending_order_context" not in st.session_state:
+    st.session_state.pending_order_context = {}
 
 # 主界面布局
 st.title("🤖 基于A2A的SmartVoyage旅行智能助手")
@@ -98,8 +100,10 @@ with col1:
                 result = st.session_state.orchestrator.process_user_input(
                     prompt,
                     st.session_state.conversation_history,
+                    st.session_state.pending_order_context,
                 )
                 response = result["response"]
+                st.session_state.pending_order_context = result.get("pending_order_context", {})
                 if result["routed_agents"]:
                     logger.info(f"路由到代理：{result['routed_agents']}")
                 st.session_state.conversation_history += f"\nAssistant: {response}"

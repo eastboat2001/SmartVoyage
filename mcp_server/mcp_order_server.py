@@ -1,10 +1,11 @@
 """
-mcp_order_server.py：交通票务订单 MCP 服务器，负责火车票和机票预定，以及订单查询。
+mcp_order_server.py：交通票务订单 MCP 服务器，负责火车票和机票预定，以及订单生命周期管理。
 
 核心功能：
     火车票预定、飞机票预定。
     查询用户订单。
     防重复下单与库存扣减。
+    退票、改签、订单状态流转。
 """
 import json
 import os
@@ -23,7 +24,7 @@ conf = Config()
 
 order_mcp = FastMCP(
     name="OrderTools",
-    instructions="交通票务订单工具，支持火车票、机票预定与订单查询。",
+    instructions="交通票务订单工具，支持火车票、机票预定、订单查询、退票与改签。",
     log_level="ERROR",
     host="127.0.0.1",
     port=8003,
@@ -64,10 +65,7 @@ class OrderService:
         conn = get_db_connection(self.config)
         try:
             cursor = conn.cursor(dictionary=True)
-            filters = [
-                "u.username = %s",
-                "o.status = 'booked'",
-            ]
+            filters = ["u.username = %s", "o.status = 'booked'"]
             params: list[object] = [username]
             if departure_date:
                 filters.append("DATE(o.departure_time) = %s")
@@ -111,6 +109,203 @@ class OrderService:
                     f"总价 {order['total_price']} 元。"
                 )
             return "\n".join(lines)
+        finally:
+            conn.close()
+
+    def cancel_ticket_order(
+        self,
+        username: str,
+        departure_date: str = "",
+        departure_city: str = "",
+        arrival_city: str = "",
+        transport_no: str = "",
+        ticket_type: str = "",
+        order_type: str = "",
+    ) -> str:
+        conn = get_db_connection(self.config)
+        try:
+            conn.start_transaction()
+            cursor = conn.cursor(dictionary=True)
+            user_id = self._get_user_id(cursor, username)
+            order = self._find_single_booked_order(
+                cursor=cursor,
+                user_id=user_id,
+                order_type=order_type,
+                departure_date=departure_date,
+                departure_city=departure_city,
+                arrival_city=arrival_city,
+                transport_no=transport_no,
+                ticket_type=ticket_type,
+                for_update=True,
+            )
+            if isinstance(order, str):
+                conn.rollback()
+                return order
+
+            self._restore_ticket_inventory(cursor, order)
+            cursor.execute(
+                "UPDATE orders SET status = 'cancelled' WHERE id = %s",
+                (order["id"],),
+            )
+            conn.commit()
+            return (
+                f"退票成功：已取消订单#{order['id']}，"
+                f"{order['departure_time']} {order['departure_city']}到{order['arrival_city']} "
+                f"{order['transport_no']} {order['ticket_or_room_type']} {order['quantity']}张。"
+            )
+        except Exception as exc:
+            conn.rollback()
+            logger.error(f"退票失败: {exc}")
+            return f"退票失败：{exc}"
+        finally:
+            conn.close()
+
+    def change_ticket_order(
+        self,
+        username: str,
+        current_departure_date: str = "",
+        departure_city: str = "",
+        arrival_city: str = "",
+        current_transport_no: str = "",
+        current_ticket_type: str = "",
+        new_departure_date: str = "",
+        new_transport_no: str = "",
+        new_ticket_type: str = "",
+        order_type: str = "",
+    ) -> str:
+        if not new_departure_date and not new_transport_no and not new_ticket_type:
+            return "改签至少需要提供新的日期、车次/航班号或席位/舱位信息。"
+
+        conn = get_db_connection(self.config)
+        try:
+            conn.start_transaction()
+            cursor = conn.cursor(dictionary=True)
+            user_id = self._get_user_id(cursor, username)
+            current_order = self._find_single_booked_order(
+                cursor=cursor,
+                user_id=user_id,
+                order_type=order_type,
+                departure_date=current_departure_date,
+                departure_city=departure_city,
+                arrival_city=arrival_city,
+                transport_no=current_transport_no,
+                ticket_type=current_ticket_type,
+                for_update=True,
+            )
+            if isinstance(current_order, str):
+                conn.rollback()
+                return current_order
+
+            resolved_type = current_order["order_type"]
+            target_date = new_departure_date or str(current_order["departure_time"])[:10]
+            target_ticket_type = new_ticket_type or current_order["ticket_or_room_type"]
+            target_transport_no = new_transport_no or ""
+
+            target_ticket = self._find_target_ticket(
+                cursor=cursor,
+                order=current_order,
+                target_date=target_date,
+                target_transport_no=target_transport_no,
+                target_ticket_type=target_ticket_type,
+            )
+            if isinstance(target_ticket, str):
+                conn.rollback()
+                return target_ticket
+
+            if (
+                current_order["departure_time"] == target_ticket["departure_time"]
+                and current_order["transport_no"] == self._ticket_transport_no(resolved_type, target_ticket)
+                and current_order["ticket_or_room_type"] == self._ticket_type_value(resolved_type, target_ticket)
+            ):
+                conn.rollback()
+                return "改签目标和当前订单完全一致，无需改签。"
+
+            duplicate = self._find_duplicate_order(
+                cursor=cursor,
+                user_id=user_id,
+                order_type=resolved_type,
+                departure_time=target_ticket["departure_time"],
+                transport_no=self._ticket_transport_no(resolved_type, target_ticket),
+                ticket_type=self._ticket_type_value(resolved_type, target_ticket),
+                exclude_order_id=current_order["id"],
+            )
+            if duplicate:
+                conn.rollback()
+                return (
+                    f"改签失败：您已存在相同目标订单，"
+                    f"{target_ticket['departure_time']} {self._ticket_transport_no(resolved_type, target_ticket)} "
+                    f"{self._ticket_type_value(resolved_type, target_ticket)} {duplicate['quantity']}张。"
+                )
+
+            if target_ticket["remaining_seats"] < current_order["quantity"]:
+                conn.rollback()
+                return (
+                    f"改签失败：目标票务余票不足，"
+                    f"{self._ticket_transport_no(resolved_type, target_ticket)} "
+                    f"{self._ticket_type_value(resolved_type, target_ticket)} 当前仅剩 {target_ticket['remaining_seats']} 张。"
+                )
+
+            self._restore_ticket_inventory(cursor, current_order)
+            self._deduct_ticket_inventory(cursor, resolved_type, target_ticket["id"], current_order["quantity"])
+
+            cursor.execute(
+                "UPDATE orders SET status = 'changed' WHERE id = %s",
+                (current_order["id"],),
+            )
+
+            payload = {
+                "previous_order_id": current_order["id"],
+                "action": "change",
+                "username": username,
+                "order_type": resolved_type,
+            }
+            unit_price = Decimal(str(target_ticket["price"]))
+            total_price = unit_price * current_order["quantity"]
+            cursor.execute(
+                """
+                INSERT INTO orders (
+                    user_id,
+                    order_type,
+                    status,
+                    departure_city,
+                    arrival_city,
+                    departure_time,
+                    ticket_or_room_type,
+                    transport_no,
+                    quantity,
+                    unit_price,
+                    total_price,
+                    raw_order_payload
+                ) VALUES (%s, %s, 'booked', %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    user_id,
+                    resolved_type,
+                    target_ticket["departure_city"],
+                    target_ticket["arrival_city"],
+                    target_ticket["departure_time"],
+                    self._ticket_type_value(resolved_type, target_ticket),
+                    self._ticket_transport_no(resolved_type, target_ticket),
+                    current_order["quantity"],
+                    unit_price,
+                    total_price,
+                    json.dumps(payload, ensure_ascii=False),
+                ),
+            )
+            new_order_id = cursor.lastrowid
+            conn.commit()
+            return (
+                f"改签成功：原订单#{current_order['id']} 已变更，"
+                f"新订单#{new_order_id} 为 {target_ticket['departure_time']} "
+                f"{target_ticket['departure_city']}到{target_ticket['arrival_city']} "
+                f"{self._ticket_transport_no(resolved_type, target_ticket)} "
+                f"{self._ticket_type_value(resolved_type, target_ticket)} "
+                f"{current_order['quantity']}张，总价 {total_price} 元。"
+            )
+        except Exception as exc:
+            conn.rollback()
+            logger.error(f"改签失败: {exc}")
+            return f"改签失败：{exc}"
         finally:
             conn.close()
 
@@ -173,13 +368,7 @@ class OrderService:
                     f"无法预订 {quantity} 张。"
                 )
 
-            update_sql = f"""
-                UPDATE {table_name}
-                SET remaining_seats = remaining_seats - %s
-                WHERE id = %s
-            """
-            cursor.execute(update_sql, (quantity, ticket["id"]))
-
+            self._deduct_ticket_inventory(cursor, order_type, ticket["id"], quantity)
             unit_price = Decimal(str(ticket["price"]))
             total_price = unit_price * quantity
             payload = {
@@ -237,6 +426,139 @@ class OrderService:
         finally:
             conn.close()
 
+    def _find_single_booked_order(
+        self,
+        *,
+        cursor,
+        user_id: int,
+        order_type: str = "",
+        departure_date: str = "",
+        departure_city: str = "",
+        arrival_city: str = "",
+        transport_no: str = "",
+        ticket_type: str = "",
+        for_update: bool = False,
+    ):
+        filters = ["user_id = %s", "status = 'booked'"]
+        params: list[object] = [user_id]
+        if order_type:
+            filters.append("order_type = %s")
+            params.append(order_type)
+        if departure_date:
+            filters.append("DATE(departure_time) = %s")
+            params.append(departure_date)
+        if departure_city:
+            filters.append("departure_city = %s")
+            params.append(departure_city)
+        if arrival_city:
+            filters.append("arrival_city = %s")
+            params.append(arrival_city)
+        if transport_no:
+            filters.append("transport_no = %s")
+            params.append(transport_no)
+        if ticket_type:
+            filters.append("ticket_or_room_type = %s")
+            params.append(ticket_type)
+
+        lock_clause = " FOR UPDATE" if for_update else ""
+        cursor.execute(
+            f"""
+            SELECT *
+            FROM orders
+            WHERE {' AND '.join(filters)}
+            ORDER BY departure_time ASC, id ASC
+            {lock_clause}
+            """,
+            params,
+        )
+        orders = cursor.fetchall()
+        if not orders:
+            if not transport_no and not (departure_date and departure_city and arrival_city):
+                return "未找到符合条件的已预订订单，请补充车次/航班号，或补充完整的日期和出发到达城市。"
+            suggestions = []
+            if not departure_date:
+                suggestions.append("日期")
+            if not (departure_city and arrival_city):
+                suggestions.append("出发和到达城市")
+            if not transport_no:
+                suggestions.append("车次/航班号")
+            if not ticket_type:
+                suggestions.append("席位/舱位")
+            suffix = "、".join(suggestions[:3]) if suggestions else "日期、路线或车次/航班号"
+            return f"未找到符合条件的已预订订单，请补充更具体的信息，例如{suffix}。"
+        if len(orders) > 1:
+            return "匹配到多条订单，请补充更具体的日期、车次/航班号或席位/舱位信息。"
+        return orders[0]
+
+    def _find_target_ticket(self, *, cursor, order: dict, target_date: str, target_transport_no: str, target_ticket_type: str):
+        table_name, transport_column, ticket_type_column = self._ticket_meta(order["order_type"])
+        filters = [
+            "departure_city = %s",
+            "arrival_city = %s",
+            "DATE(departure_time) = %s",
+            f"{ticket_type_column} = %s",
+        ]
+        params: list[object] = [
+            order["departure_city"],
+            order["arrival_city"],
+            target_date,
+            target_ticket_type,
+        ]
+        if target_transport_no:
+            filters.append(f"{transport_column} = %s")
+            params.append(target_transport_no)
+        cursor.execute(
+            f"""
+            SELECT *
+            FROM {table_name}
+            WHERE {' AND '.join(filters)}
+            ORDER BY departure_time ASC
+            FOR UPDATE
+            """,
+            params,
+        )
+        tickets = cursor.fetchall()
+        if not tickets:
+            missing = []
+            if not target_date:
+                missing.append("新日期")
+            if not target_transport_no:
+                missing.append("新车次/航班号")
+            if not target_ticket_type:
+                missing.append("新席位/舱位")
+            suffix = "、".join(missing) if missing else "新日期、新车次/航班号或新席位/舱位"
+            return f"未找到符合改签条件的新票务，请补充更明确的{suffix}。"
+        return tickets[0]
+
+    def _restore_ticket_inventory(self, cursor, order: dict) -> None:
+        table_name, transport_column, ticket_type_column = self._ticket_meta(order["order_type"])
+        cursor.execute(
+            f"""
+            UPDATE {table_name}
+            SET remaining_seats = remaining_seats + %s
+            WHERE {transport_column} = %s
+              AND {ticket_type_column} = %s
+              AND departure_time = %s
+            """,
+            (
+                order["quantity"],
+                order["transport_no"],
+                order["ticket_or_room_type"],
+                order["departure_time"],
+            ),
+        )
+
+    def _deduct_ticket_inventory(self, cursor, order_type: str, ticket_id: int, quantity: int) -> None:
+        table_name, _, _ = self._ticket_meta(order_type)
+        cursor.execute(
+            f"""
+            UPDATE {table_name}
+            SET remaining_seats = remaining_seats - %s
+            WHERE id = %s
+            """,
+            (quantity, ticket_id),
+        )
+
     @staticmethod
     def _find_duplicate_order(
         *,
@@ -246,9 +568,9 @@ class OrderService:
         departure_time,
         transport_no: str,
         ticket_type: str,
+        exclude_order_id: int | None = None,
     ):
-        cursor.execute(
-            """
+        sql = """
             SELECT id, quantity
             FROM orders
             WHERE user_id = %s
@@ -257,10 +579,13 @@ class OrderService:
               AND departure_time = %s
               AND transport_no = %s
               AND ticket_or_room_type = %s
-            LIMIT 1
-            """,
-            (user_id, order_type, departure_time, transport_no, ticket_type),
-        )
+        """
+        params: list[object] = [user_id, order_type, departure_time, transport_no, ticket_type]
+        if exclude_order_id is not None:
+            sql += " AND id <> %s"
+            params.append(exclude_order_id)
+        sql += " LIMIT 1"
+        cursor.execute(sql, params)
         return cursor.fetchone()
 
     def _get_user_id(self, cursor, username: str) -> int:
@@ -273,13 +598,23 @@ class OrderService:
             INSERT INTO users (username, phone, default_departure_city)
             VALUES (%s, %s, %s)
             """,
-            (
-                username,
-                self._phone_for_username(username),
-                self.config.default_departure_city,
-            ),
+            (username, self._phone_for_username(username), self.config.default_departure_city),
         )
         return int(cursor.lastrowid)
+
+    @staticmethod
+    def _ticket_meta(order_type: str) -> tuple[str, str, str]:
+        if order_type == "train":
+            return "train_tickets", "train_number", "seat_type"
+        return "flight_tickets", "flight_number", "cabin_type"
+
+    @staticmethod
+    def _ticket_transport_no(order_type: str, ticket: dict) -> str:
+        return ticket["train_number"] if order_type == "train" else ticket["flight_number"]
+
+    @staticmethod
+    def _ticket_type_value(order_type: str, ticket: dict) -> str:
+        return ticket["seat_type"] if order_type == "train" else ticket["cabin_type"]
 
     @staticmethod
     def _order_type_label(order_type: str) -> str:
@@ -321,6 +656,66 @@ def order_flight(username: str, departure_date: str, flight_number: str, seat_ty
 def query_user_orders(username: str, departure_date: str = "") -> str:
     logger.info(f"正在查询用户订单: {username}, departure_date={departure_date}")
     return service.query_user_orders(username, departure_date)
+
+
+@order_mcp.tool(
+    name="cancel_ticket_order",
+    description="根据用户名和订单特征退掉一张已预订的高铁票或机票，会自动恢复库存"
+)
+def cancel_ticket_order(
+    username: str,
+    departure_date: str = "",
+    departure_city: str = "",
+    arrival_city: str = "",
+    transport_no: str = "",
+    ticket_type: str = "",
+    order_type: str = "",
+) -> str:
+    logger.info(f"正在退票: {username}, {departure_date}, {departure_city}, {arrival_city}, {transport_no}, {ticket_type}, {order_type}")
+    return service.cancel_ticket_order(
+        username=username,
+        departure_date=departure_date,
+        departure_city=departure_city,
+        arrival_city=arrival_city,
+        transport_no=transport_no,
+        ticket_type=ticket_type,
+        order_type=order_type,
+    )
+
+
+@order_mcp.tool(
+    name="change_ticket_order",
+    description="根据用户名和当前订单信息执行高铁票或机票改签，会回补原库存并扣减新库存"
+)
+def change_ticket_order(
+    username: str,
+    current_departure_date: str = "",
+    departure_city: str = "",
+    arrival_city: str = "",
+    current_transport_no: str = "",
+    current_ticket_type: str = "",
+    new_departure_date: str = "",
+    new_transport_no: str = "",
+    new_ticket_type: str = "",
+    order_type: str = "",
+) -> str:
+    logger.info(
+        "正在改签: "
+        f"{username}, {current_departure_date}, {departure_city}, {arrival_city}, "
+        f"{current_transport_no}, {current_ticket_type}, {new_departure_date}, {new_transport_no}, {new_ticket_type}, {order_type}"
+    )
+    return service.change_ticket_order(
+        username=username,
+        current_departure_date=current_departure_date,
+        departure_city=departure_city,
+        arrival_city=arrival_city,
+        current_transport_no=current_transport_no,
+        current_ticket_type=current_ticket_type,
+        new_departure_date=new_departure_date,
+        new_transport_no=new_transport_no,
+        new_ticket_type=new_ticket_type,
+        order_type=order_type,
+    )
 
 
 def create_order_mcp_server():

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import uuid
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ class AgentExecutionResult:
     text: str
     degraded: bool = False
     no_data: bool = False
+    pending_order_context: dict | None = None
 
 
 class SmartVoyageOrchestrator:
@@ -65,23 +67,50 @@ class SmartVoyageOrchestrator:
         logger.info(f"意图识别结构化响应: {result.model_dump()}")
         return result.intents, result.user_queries, result.follow_up_message
 
-    def process_user_input(self, prompt: str, conversation_history: str) -> dict:
+    def process_user_input(
+        self,
+        prompt: str,
+        conversation_history: str,
+        pending_order_context: dict | None = None,
+    ) -> dict:
         intents, user_queries, follow_up_message = self.recognize_intent(
             prompt,
             conversation_history,
         )
+        pending_order_context = pending_order_context or {}
+        intents, user_queries, follow_up_message, pending_order_context = self._merge_pending_order_context(
+            prompt,
+            conversation_history,
+            intents,
+            user_queries,
+            follow_up_message,
+            pending_order_context,
+        )
 
         if "out_of_scope" in intents:
-            return {"response": follow_up_message, "intents": intents, "routed_agents": []}
+            return {
+                "response": follow_up_message,
+                "intents": intents,
+                "routed_agents": [],
+                "pending_order_context": {},
+            }
 
         if follow_up_message:
-            return {"response": follow_up_message, "intents": intents, "routed_agents": []}
+            return {
+                "response": follow_up_message,
+                "intents": intents,
+                "routed_agents": [],
+                "pending_order_context": pending_order_context,
+            }
 
         if "travel_plan" in intents:
-            return self._handle_travel_plan(prompt, conversation_history, user_queries, intents)
+            result = self._handle_travel_plan(prompt, conversation_history, user_queries, intents)
+            result["pending_order_context"] = {}
+            return result
 
         responses: list[str] = []
         routed_agents: list[str] = []
+        next_pending_order_context: dict = pending_order_context if self._has_order_intent(intents) else {}
         for intent in intents:
             if intent == "attraction":
                 responses.append(
@@ -100,14 +129,22 @@ class SmartVoyageOrchestrator:
 
             query_str = user_queries.get(intent, prompt)
             query_str = self._with_user_context(intent, query_str)
+            if intent in {"cancel_order", "change_order"} and pending_order_context:
+                query_str = self._with_pending_order_context(query_str, pending_order_context)
             result = self._call_agent(agent_name, query_str, conversation_history)
             routed_agents.append(agent_name)
             responses.append(self._finalize_agent_response(agent_name, query_str, result))
+            if intent in {"order", "my_orders", "cancel_order", "change_order"}:
+                if result.state == "input_required" and result.pending_order_context:
+                    next_pending_order_context = result.pending_order_context
+                elif result.state in {"completed", "failed"}:
+                    next_pending_order_context = {}
 
         return {
             "response": "\n\n".join(responses),
             "intents": intents,
             "routed_agents": routed_agents,
+            "pending_order_context": next_pending_order_context,
         }
 
     def _handle_travel_plan(
@@ -263,6 +300,7 @@ class SmartVoyageOrchestrator:
             )
 
         state = str(getattr(raw_response.status, "state", "")).split(".")[-1].lower()
+        content: dict = {}
         if state == "completed":
             text = raw_response.artifacts[0]["parts"][0]["text"]
         else:
@@ -276,6 +314,7 @@ class SmartVoyageOrchestrator:
             text=text,
             degraded=state == "failed",
             no_data="未找到" in text,
+            pending_order_context=content.get("pending_order_context") if isinstance(content, dict) else None,
         )
 
     def _run_sync(self, coro):
@@ -294,16 +333,59 @@ class SmartVoyageOrchestrator:
             return "WeatherQueryAssistant"
         if intent in {"flight", "train"}:
             return "TicketQueryAssistant"
-        if intent in {"order", "my_orders"}:
+        if intent in {"order", "my_orders", "cancel_order", "change_order"}:
             return "TicketOrderAssistant"
         return None
 
+    @staticmethod
+    def _has_order_intent(intents: list[str]) -> bool:
+        return any(intent in {"order", "my_orders", "cancel_order", "change_order"} for intent in intents)
+
+    def _merge_pending_order_context(
+        self,
+        prompt: str,
+        conversation_history: str,
+        intents: list[str],
+        user_queries: dict[str, str],
+        follow_up_message: str,
+        pending_order_context: dict,
+    ) -> tuple[list[str], dict[str, str], str, dict]:
+        if not pending_order_context:
+            return intents, user_queries, follow_up_message, {}
+
+        if any(intent in {"weather", "flight", "train", "travel_plan", "attraction"} for intent in intents):
+            return intents, user_queries, follow_up_message, {}
+
+        if self._has_order_intent(intents):
+            return intents, user_queries, follow_up_message, pending_order_context
+
+        combined_prompt = self._pending_context_user_prompt(prompt, pending_order_context)
+        combined_intents, combined_user_queries, combined_follow_up = self.recognize_intent(
+            combined_prompt,
+            conversation_history,
+        )
+        if self._has_order_intent(combined_intents):
+            return combined_intents, combined_user_queries, combined_follow_up, pending_order_context
+        return intents, user_queries, follow_up_message, {}
+
     def _with_user_context(self, intent: str, query: str) -> str:
-        if intent not in {"order", "my_orders"}:
+        if intent not in {"order", "my_orders", "cancel_order", "change_order"}:
             return query
         if "当前用户" in query:
             return query
         return f"当前用户：{self.current_username}\n{query}"
+
+    @staticmethod
+    def _with_pending_order_context(query: str, pending_order_context: dict) -> str:
+        if not pending_order_context:
+            return query
+        payload = json.dumps(pending_order_context, ensure_ascii=False)
+        return f"[PENDING_ORDER_CONTEXT]{payload}[/PENDING_ORDER_CONTEXT]\n{query}"
+
+    @staticmethod
+    def _pending_context_user_prompt(prompt: str, pending_order_context: dict) -> str:
+        payload = json.dumps(pending_order_context, ensure_ascii=False)
+        return f"继续处理之前的订单操作。待补上下文：{payload}。本轮补充：{prompt}"
 
     def _build_ticket_fact_response(self, query_str: str, raw_text: str) -> str:
         normalized_query = query_str.replace("当前用户：", "")

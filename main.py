@@ -10,6 +10,7 @@ agent_network = None  # 代理网络实例
 agent_urls = {}  # 存储代理的URL信息字典
 conversation_history = ""  # 存储整个对话历史字符串，用于意图识别
 orchestrator = None
+pending_order_context = {}
 
 
 # 初始化代理网络和相关组件   此部分在脚本启动时执行一次，模拟Streamlit的初始化
@@ -18,13 +19,14 @@ def initialize_system():
     初始化系统组件，包括代理网络、路由器、LLM和会话状态
     核心逻辑：构建AgentNetwork，添加代理，创建路由器和LLM
     """
-    global agent_network, agent_urls, conversation_history, orchestrator
+    global agent_network, agent_urls, conversation_history, orchestrator, pending_order_context
     orchestrator = SmartVoyageOrchestrator(conf)
     agent_urls = orchestrator.agent_urls
     agent_network = orchestrator.agent_network
 
     # 初始化对话历史为空字符串
     conversation_history = ""
+    pending_order_context = {}
 
 # 处理用户输入的核心函数
 # 此函数模拟Streamlit的输入处理逻辑，包括意图识别、路由和响应生成
@@ -33,15 +35,16 @@ def process_user_input(prompt):
     处理用户输入：识别意图、调用代理、生成响应
     核心逻辑：使用LLM进行意图识别，根据意图路由到相应代理或直接生成内容
     """
-    global messages, conversation_history, orchestrator
+    global messages, conversation_history, orchestrator, pending_order_context
     # 添加用户消息到历史
     messages.append({"role": "user", "content": prompt})
     conversation_history += f"\nUser: {prompt}"
 
     print("正在分析您的意图...")
     try:
-        result = orchestrator.process_user_input(prompt, conversation_history)
+        result = orchestrator.process_user_input(prompt, conversation_history, pending_order_context)
         response = result["response"]
+        pending_order_context = result.get("pending_order_context", {})
         if result["routed_agents"]:
             logger.info(f"路由到代理：{result['routed_agents']}")
         conversation_history += f"\nAssistant: {response}"  # 更新历史

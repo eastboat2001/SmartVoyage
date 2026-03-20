@@ -46,6 +46,8 @@ async def order_tickets(query):
 
 if __name__ == "__main__":
     print("示例：当前用户：demo_user\\n帮我预订2026-03-21北京到上海的高铁票，二等座1张")
+    print("示例：当前用户：demo_user\\n帮我退掉2026-03-21北京到上海的高铁票")
+    print("示例：当前用户：demo_user\\n把我2026-03-21北京到上海的高铁票改签到2026-03-22二等座")
     while True:
         query = input("请输入查询：")
         if query == "exit":

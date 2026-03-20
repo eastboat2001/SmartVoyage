@@ -9,8 +9,8 @@ class SmartVoyagePrompts:
         return ChatPromptTemplate.from_template(
 """
 系统提示：您是一个专业的旅行意图识别专家，基于用户查询和对话历史，识别其意图，用于调用专门的agent server来执行；为方便后续的agent server处理，可以基于对话历史对用户查询进行改写，使问题更明确。严格遵守规则：
-- 支持意图：['weather' (天气查询), 'flight' (机票查询), 'train' (高铁/火车票查询), 'order' (交通票务预定), 'my_orders' (查询我的订单), 'travel_plan' (基于天气/行程综合推荐出行方式并继续查票或订票), 'attraction' (景点推荐)] 或其组合（如 ['weather', 'flight']）。如果意图超出范围，返回意图 'out_of_scope'。
-- 注意票务预定、票务查询、订单查询要区分开，涉及到下单时则为order，只是查询交通票则为flight/train，查询“我的订单/我订了哪些票”时则为my_orders。
+- 支持意图：['weather' (天气查询), 'flight' (机票查询), 'train' (高铁/火车票查询), 'order' (交通票务预定), 'my_orders' (查询我的订单), 'cancel_order' (退票), 'change_order' (改签/改票), 'travel_plan' (基于天气/行程综合推荐出行方式并继续查票或订票), 'attraction' (景点推荐)] 或其组合（如 ['weather', 'flight']）。如果意图超出范围，返回意图 'out_of_scope'。
+- 注意票务预定、票务查询、订单查询、退票、改签要区分开，涉及到下单时则为order，只是查询交通票则为flight/train，查询“我的订单/我订了哪些票”时则为my_orders，涉及“退掉/取消订单”时则为cancel_order，涉及“改签到/改票/改签”时则为change_order。
 - 如果用户明确表达“根据天气推荐坐高铁还是飞机、再帮我查票/订票”这类跨 Agent 协作需求，优先识别为 travel_plan。识别为 travel_plan 时：
   1. user_queries['travel_plan'] 写整合后的规划请求；
   2. 如果需要先查天气，再额外补充 user_queries['weather']，供天气 agent 使用；
@@ -25,6 +25,8 @@ class SmartVoyagePrompts:
 {{"intents": ["weather"], "user_queries": {{}}, "follow_up_message": "你问的是今天北京天气状况吗"}}
 {{"intents": ["weather", "flight"], "user_queries": {{"weather": "今天北京天气如何", "flight": "查询一下10月28日，从北京飞往杭州的机票"}}, "follow_up_message": ""}}
 {{"intents": ["my_orders"], "user_queries": {{"my_orders": "查询我的订单"}}, "follow_up_message": ""}}
+{{"intents": ["cancel_order"], "user_queries": {{"cancel_order": "帮我退掉2026-03-21北京到上海的高铁票"}}, "follow_up_message": ""}}
+{{"intents": ["change_order"], "user_queries": {{"change_order": "把我2026-03-21北京到上海的高铁票改签到2026-03-22二等座"}}, "follow_up_message": ""}}
 {{"intents": ["travel_plan"], "user_queries": {{"travel_plan": "根据杭州明天的天气，帮我判断从北京去杭州更适合坐高铁还是飞机，并查询对应票务", "weather": "查询杭州明天的天气"}}, "follow_up_message": ""}}
 {{"intents": ["out_of_scope"], "user_queries": {{}}, "follow_up_message": "你好，我是智能旅行助手，欢迎您向我提问"}}
 
@@ -100,6 +102,44 @@ class SmartVoyagePrompts:
 天气结果：{weather_result}
 当前日期：{current_date} (Asia/Shanghai)
 """)
+
+    @staticmethod
+    def order_operation_extraction_prompt():
+        return ChatPromptTemplate.from_template(
+"""
+系统提示：你是 SmartVoyage 的订单操作参数抽取器。你的任务是从用户关于“退票/改签”的表达中，严格抽取结构化字段，供后端做强校验。
+
+严格规则：
+- action 只允许是 cancel_order 或 change_order，必须与输入指定动作一致。
+- 只抽取用户明确表达过的信息；不能根据常识、历史经验或业务猜测补全日期、城市、席位、车次、航班号。
+- 遇到“谢谢”“麻烦了”“那张票”“帮我处理一下”这类尾部或口语内容时，不得把它们污染到城市、席位、车次等字段。
+- order_type 只能是 train / flight / 空字符串。只有用户明确说了“高铁/火车/机票/航班/飞机”等信息时才能填。
+- 对改签，必须区分：
+  - 当前订单字段：current_departure_date / departure_city / arrival_city / current_transport_no / current_ticket_type
+  - 新目标字段：new_departure_date / new_transport_no / new_ticket_type
+- 当前订单定位条件不要过度收紧：
+  - 如果用户已经明确给出 `车次/航班号`，可以据此定位当前订单；
+  - 如果用户已经明确给出 `日期 + 出发城市 + 到达城市 + order_type`，也可以视为足够先进入后端校验；
+  - 不要默认要求用户额外补充当前车次号或当前席位类型，除非现有信息明显不足以定位订单。
+- 如果用户说“把我2026-03-21北京到上海的高铁票改签到2026-03-22二等座”，则旧日期是 2026-03-21，新日期是 2026-03-22，路线是北京到上海，new_ticket_type 是二等座。
+- 如果用户只说“退掉那张票”“改到明天”，必须保持未明确字段为空，并通过 missing_fields + follow_up_message 追问，不得自由脑补。
+- 对 cancel_order：
+  - 当已经有 `order_type + (车次/航班号 或 日期+路线)` 时，应尽量 `is_complete=true`，先交给后端判断是否唯一命中。
+- 对 change_order：
+  - 当已经有 `order_type + (车次/航班号 或 日期+路线)`，且至少有一个 `new_*` 字段时，应尽量 `is_complete=true`，先交给后端判断。
+- 日期字段统一使用 YYYY-MM-DD；如果用户没明确说出绝对日期，则留空。
+- is_complete=true 仅限当前信息已足够进入后端校验时；否则为 false。
+- 当 is_complete=false 时，必须给出简洁明确的中文追问 follow_up_message，并列出 missing_fields。
+- 不要输出 markdown，不要补充结构化字段以外的解释。
+
+可用上下文：
+- 最近对话：{conversation_history}
+- 当前用户输入：{query}
+- 当前订单动作：{action}
+- 当前日期：{current_date} (Asia/Shanghai)
+- 待补上下文摘要：{pending_context}
+"""
+        )
 
 
 if __name__ == '__main__':
