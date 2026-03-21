@@ -59,6 +59,8 @@
   - 已支持 `travel_plan` 输出天气 + 交通 + 酒店联动建议
   - 已支持在统一编排层中串起 `Weather -> Ticket -> Hotel`
   - 已支持对“玩几天 / 住宿 / 酒店方案”类请求生成酒店查询
+  - `travel_plan` 已开始改成独立 workflow/subgraph，而不是仅在 orchestrator 内联顺序调用
+  - 已支持结合当前已预订交通/酒店订单，判断当前行程是否齐备以及还缺哪一段
 
 
 ## 一、当前项目现状总结
@@ -594,6 +596,7 @@ README 最终建议具备：
 - 已让后端负责强校验、追问决策和 MCP/tool 执行
 - 已下掉大部分子域内部零散关键词判断
 - 已开始把 `travel_plan` 从全局编排层正则判断改成独立域内 state 抽取
+- 已开始把 `travel_plan` 从 orchestrator 内联逻辑改成独立 workflow/subgraph
 
 后续仍可继续增强：
 

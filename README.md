@@ -640,6 +640,8 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
   - 先做 `travel_plan` 槽位抽取，再由后端判断 `missing_slots`
   - 当前全局编排层只保留最小跨域上下文，不再承担 `travel_plan` 的主字段解析
   - `travel_plan` 当前最小核心字段：`departure_city / arrival_city / travel_date / stay_days / include_hotel / should_order`
+  - `travel_plan` 当前已在编排层内部拆成独立 workflow/subgraph：`prepare -> weather -> plan -> ticket -> hotel/order -> finalize`
+  - `travel_plan` 当前会读取本次行程相关的已预订交通/酒店订单，并在结论中明确说明“当前是否已齐备、还缺哪一段”
 - 订单域 LangGraph 流程
   - `prepare -> query_orders | cancel_order | change_order | lookup_tickets -> create_order`
   - `prepare` 节点统一由 LLM 产出 action 与 slots，再由后端计算缺失字段、生成追问和执行 payload

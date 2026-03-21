@@ -5,10 +5,11 @@ import json
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytz
+from langgraph.graph import END, START, StateGraph
 from python_a2a import AgentNetwork, Message, MessageRole, Task, TextContent
 from typing_extensions import TypedDict
 
@@ -50,6 +51,44 @@ class TravelPlanState(TypedDict):
     original_query: str
 
 
+class TravelPlanWorkflowState(TypedDict, total=False):
+    conversation_history: str
+    latest_query: str
+    intents: list[str]
+    pending_context: dict[str, Any]
+    user_profile_summary: str
+    user_profile_home_city: str
+    travel_state: TravelPlanState
+    slots: dict[str, Any]
+    weather_query: str
+    normalized_travel_query: str
+    weather_text: str
+    weather_result_state: str
+    weather_result_degraded: bool
+    weather_result_no_data: bool
+    weather_result_raw_text: str
+    weather_brief: str
+    trip_status_summary: str
+    transport_mode: str
+    recommendation_reason: str
+    ticket_query: str
+    hotel_query: str
+    hotel_reason: str
+    should_order: bool
+    existing_transport_summary: str
+    existing_hotel_summary: str
+    ticket_result_state: str
+    ticket_final_text: str
+    hotel_result_state: str
+    hotel_final_text: str
+    order_result_state: str
+    order_final_text: str
+    routed_agents: list[str]
+    final_text: str
+    final_state: str
+    next_pending_context: dict[str, Any]
+
+
 @dataclass
 class UserPreferenceProfile:
     username: str
@@ -85,6 +124,7 @@ class SmartVoyageOrchestrator:
         self.agent_urls = dict(DEFAULT_AGENT_URLS)
         self.agent_network = self._build_network()
         self.current_username = config.default_username
+        self.travel_plan_workflow = self._build_travel_plan_workflow()
 
     def _load_user_preferences(self) -> UserPreferenceProfile:
         conn = None
@@ -137,6 +177,38 @@ class SmartVoyageOrchestrator:
         for agent_name, agent_url in self.agent_urls.items():
             network.add(agent_name, agent_url)
         return network
+
+    def _build_travel_plan_workflow(self):
+        workflow = StateGraph(TravelPlanWorkflowState)
+        workflow.add_node("prepare", self._prepare_travel_plan_state)
+        workflow.add_node("weather", self._travel_plan_weather_node)
+        workflow.add_node("plan", self._travel_plan_plan_node)
+        workflow.add_node("ticket", self._travel_plan_ticket_node)
+        workflow.add_node("hotel", self._travel_plan_hotel_node)
+        workflow.add_node("order", self._travel_plan_order_node)
+        workflow.add_node("finalize", self._travel_plan_finalize_node)
+
+        workflow.add_edge(START, "prepare")
+        workflow.add_conditional_edges(
+            "prepare",
+            self._route_travel_plan_after_prepare,
+            {"finish": END, "weather": "weather"},
+        )
+        workflow.add_edge("weather", "plan")
+        workflow.add_edge("plan", "ticket")
+        workflow.add_conditional_edges(
+            "ticket",
+            self._route_travel_plan_after_ticket,
+            {"hotel": "hotel", "order": "order", "finalize": "finalize"},
+        )
+        workflow.add_conditional_edges(
+            "hotel",
+            self._route_travel_plan_after_hotel,
+            {"order": "order", "finalize": "finalize"},
+        )
+        workflow.add_edge("order", "finalize")
+        workflow.add_edge("finalize", END)
+        return workflow.compile()
 
     def recognize_intent(self, user_input: str, conversation_history: str):
         current_date = datetime.now(pytz.timezone("Asia/Shanghai")).strftime("%Y-%m-%d")
@@ -317,109 +389,297 @@ class SmartVoyageOrchestrator:
         user_profile: UserPreferenceProfile,
         pending_context: dict | None,
     ) -> dict:
-        travel_query = user_queries.get("travel_plan", prompt)
+        workflow_state = self.travel_plan_workflow.invoke(
+            {
+                "conversation_history": conversation_history,
+                "latest_query": user_queries.get("travel_plan", prompt),
+                "intents": intents,
+                "pending_context": pending_context or {},
+                "user_profile_summary": user_profile.summary_text(),
+                "user_profile_home_city": user_profile.home_city,
+                "routed_agents": [],
+            }
+        )
+        return {
+            "response": workflow_state.get("final_text", "暂时无法生成出行方案。"),
+            "intents": intents,
+            "routed_agents": workflow_state.get("routed_agents", []),
+            "pending_context": workflow_state.get("next_pending_context", {}),
+        }
+
+    def _prepare_travel_plan_state(self, state: TravelPlanWorkflowState) -> dict[str, Any]:
+        travel_query = state["latest_query"]
+        pending_context = state.get("pending_context", {})
         travel_state = self._extract_travel_plan_state(
             query=travel_query,
-            conversation_history=conversation_history,
-            pending_context=pending_context or {},
+            conversation_history=state["conversation_history"],
+            pending_context=pending_context,
         )
+        next_state: dict[str, Any] = {
+            "travel_state": travel_state,
+            "slots": travel_state["slots"],
+            "routed_agents": state.get("routed_agents", []),
+        }
         if travel_state["missing_slots"]:
-            return {
-                "response": self._travel_plan_follow_up_message(travel_state["missing_slots"], user_profile),
-                "intents": intents,
-                "routed_agents": [],
-                "pending_context": self._build_travel_plan_pending_context(travel_state),
-            }
+            next_state["final_text"] = self._travel_plan_follow_up_message(
+                travel_state["missing_slots"],
+                state.get("user_profile_home_city", ""),
+            )
+            next_state["final_state"] = "input_required"
+            next_state["next_pending_context"] = self._build_travel_plan_pending_context(travel_state)
+            return next_state
 
-        slots = travel_state["slots"]
-        weather_query = self._build_weather_query(slots)
-        normalized_travel_query = self._build_travel_plan_query(slots)
+        next_state["weather_query"] = self._build_weather_query(travel_state["slots"])
+        next_state["normalized_travel_query"] = self._build_travel_plan_query(travel_state["slots"])
+        existing_orders = self._load_existing_travel_plan_orders(travel_state["slots"])
+        next_state["existing_transport_summary"] = existing_orders["transport_summary"]
+        next_state["existing_hotel_summary"] = existing_orders["hotel_summary"]
+        next_state["final_state"] = "in_progress"
+        return next_state
+
+    def _travel_plan_weather_node(self, state: TravelPlanWorkflowState) -> dict[str, Any]:
         weather_result = self._call_agent(
             "WeatherQueryAssistant",
-            weather_query,
-            conversation_history,
+            state["weather_query"],
+            state["conversation_history"],
         )
-
         weather_text = weather_result.text
         if weather_result.state == "completed":
             weather_text = self.invoker.invoke_text(
                 SmartVoyagePrompts.summarize_weather_prompt(),
-                {"query": weather_query, "raw_response": weather_result.text},
+                {"query": state["weather_query"], "raw_response": weather_result.text},
                 description="天气总结",
             )
         elif weather_result.no_data:
             weather_text = weather_result.text
+        return {
+            "weather_result_state": weather_result.state,
+            "weather_result_degraded": weather_result.degraded,
+            "weather_result_no_data": weather_result.no_data,
+            "weather_result_raw_text": weather_result.text,
+            "weather_text": weather_text,
+            "routed_agents": [*state.get("routed_agents", []), "WeatherQueryAssistant"],
+        }
 
+    def _travel_plan_plan_node(self, state: TravelPlanWorkflowState) -> dict[str, Any]:
         plan = self.invoker.invoke_structured(
             SmartVoyagePrompts.travel_planner_prompt(),
             TravelPlanResult,
             {
-                "query": normalized_travel_query,
-                "weather_result": weather_text,
-                "user_preferences": user_profile.summary_text(),
+                "query": state["normalized_travel_query"],
+                "weather_result": state["weather_text"],
+                "user_preferences": state["user_profile_summary"],
+                "existing_transport_orders": state.get("existing_transport_summary", "") or "无",
+                "existing_hotel_orders": state.get("existing_hotel_summary", "") or "无",
+                "stay_days": int(state["slots"].get("stay_days", 1)),
                 "current_date": datetime.now(pytz.timezone("Asia/Shanghai")).strftime("%Y-%m-%d"),
             },
             description="跨 Agent 出行规划",
         )
+        return {
+            "weather_brief": plan.weather_brief,
+            "trip_status_summary": plan.trip_status_summary,
+            "transport_mode": plan.transport_mode,
+            "recommendation_reason": plan.recommendation_reason,
+            "ticket_query": plan.ticket_query,
+            "hotel_query": plan.hotel_query,
+            "hotel_reason": plan.hotel_reason,
+            "should_order": plan.should_order,
+        }
 
+    def _travel_plan_ticket_node(self, state: TravelPlanWorkflowState) -> dict[str, Any]:
+        if str(state.get("existing_transport_summary", "")).strip():
+            return {
+                "ticket_result_state": "completed",
+                "ticket_final_text": f"已有关联交通订单：{state['existing_transport_summary']}",
+                "ticket_result_raw_text": "",
+            }
         ticket_result = self._call_agent(
             "TicketQueryAssistant",
-            plan.ticket_query,
-            conversation_history,
+            state["ticket_query"],
+            state["conversation_history"],
         )
-        routed_agents = ["WeatherQueryAssistant", "TicketQueryAssistant"]
+        return {
+            "ticket_result_state": ticket_result.state,
+            "ticket_final_text": self._finalize_agent_response("TicketQueryAssistant", state["ticket_query"], ticket_result),
+            "ticket_result_raw_text": ticket_result.text,
+            "routed_agents": [*state.get("routed_agents", []), "TicketQueryAssistant"],
+        }
 
+    def _travel_plan_hotel_node(self, state: TravelPlanWorkflowState) -> dict[str, Any]:
+        if str(state.get("existing_hotel_summary", "")).strip():
+            return {
+                "hotel_result_state": "completed",
+                "hotel_final_text": f"已有关联酒店订单：{state['existing_hotel_summary']}",
+            }
+        hotel_query = self._with_user_context("hotel", state["hotel_query"])
+        hotel_result = self._call_agent(
+            "HotelAssistant",
+            hotel_query,
+            state["conversation_history"],
+        )
+        return {
+            "hotel_result_state": hotel_result.state,
+            "hotel_final_text": self._finalize_agent_response("HotelAssistant", hotel_query, hotel_result),
+            "routed_agents": [*state.get("routed_agents", []), "HotelAssistant"],
+        }
+
+    def _travel_plan_order_node(self, state: TravelPlanWorkflowState) -> dict[str, Any]:
+        if state.get("ticket_result_state") != "completed":
+            return {
+                "order_result_state": "skipped",
+                "order_final_text": "由于前一步没有查到可用票务数据，本次没有继续提交订票请求。",
+            }
+        order_query = self._build_order_query(
+            travel_query=state["normalized_travel_query"],
+            transport_mode=state["transport_mode"],
+            ticket_result_text=state.get("ticket_result_raw_text", ""),
+        )
+        order_query = self._with_user_context("order", order_query)
+        order_result = self._call_agent(
+            "TicketOrderAssistant",
+            order_query,
+            state["conversation_history"],
+        )
+        return {
+            "order_result_state": order_result.state,
+            "order_final_text": self._finalize_agent_response("TicketOrderAssistant", order_query, order_result),
+            "routed_agents": [*state.get("routed_agents", []), "TicketOrderAssistant"],
+        }
+
+    def _travel_plan_finalize_node(self, state: TravelPlanWorkflowState) -> dict[str, Any]:
         sections = [
-            f"天气判断：{plan.weather_brief or weather_text}",
-            f"出行建议：建议优先选择{self._transport_label(plan.transport_mode)}。{plan.recommendation_reason}",
-            f"票务结果：{self._finalize_agent_response('TicketQueryAssistant', plan.ticket_query, ticket_result)}",
+            f"当前行程状态：{state['trip_status_summary']}",
+            f"天气判断：{state.get('weather_brief') or state.get('weather_text', '')}",
+            f"出行建议：建议优先选择{self._transport_label(state['transport_mode'])}。{state['recommendation_reason']}",
+            f"票务结果：{state['ticket_final_text']}",
         ]
-
-        if plan.hotel_query.strip():
-            hotel_query = self._with_user_context("hotel", plan.hotel_query)
-            hotel_result = self._call_agent(
-                "HotelAssistant",
-                hotel_query,
-                conversation_history,
+        if state.get("hotel_query", "").strip():
+            hotel_intro = (
+                f"住宿建议：{state['hotel_reason']}"
+                if str(state.get("hotel_reason", "")).strip()
+                else "住宿建议：已结合当前行程补充酒店候选。"
             )
-            routed_agents.append("HotelAssistant")
-            hotel_intro = f"住宿建议：{plan.hotel_reason}" if plan.hotel_reason.strip() else "住宿建议：已结合当前行程补充酒店候选。"
             sections.append(hotel_intro)
-            sections.append(
-                f"酒店结果：{self._finalize_agent_response('HotelAssistant', hotel_query, hotel_result)}"
-            )
+            sections.append(f"酒店结果：{state.get('hotel_final_text', '暂无酒店结果。')}")
+        if state.get("should_order"):
+            sections.append(f"预订结果：{state.get('order_final_text', '本次没有继续提交订票请求。')}")
 
-        if plan.should_order:
-            if ticket_result.state == "completed":
-                order_query = self._build_order_query(
-                    travel_query=normalized_travel_query,
-                    transport_mode=plan.transport_mode,
-                    ticket_result_text=ticket_result.text,
-                )
-                order_query = self._with_user_context("order", order_query)
-                order_result = self._call_agent(
-                    "TicketOrderAssistant",
-                    order_query,
-                    conversation_history,
-                )
-                routed_agents.append("TicketOrderAssistant")
-                sections.append(
-                    f"预订结果：{self._finalize_agent_response('TicketOrderAssistant', order_query, order_result)}"
+        if state.get("weather_result_degraded"):
+            sections.insert(0, "协作降级：天气服务暂时不可用，当前建议基于保守策略继续完成票务协作。")
+        elif state.get("weather_result_no_data"):
+            sections.insert(0, "天气数据提醒：当前数据库里没有命中对应日期的天气数据，以下建议基于缺失天气数据时的保守策略。")
+        return {
+            "final_text": "\n\n".join(sections),
+            "final_state": "completed",
+            "next_pending_context": {},
+        }
+
+    def _load_existing_travel_plan_orders(self, slots: dict[str, str | int | bool]) -> dict[str, str]:
+        departure_city = str(slots.get("departure_city", "")).strip()
+        arrival_city = str(slots.get("arrival_city", "")).strip()
+        travel_date = str(slots.get("travel_date", "")).strip()
+        stay_days = int(slots.get("stay_days", 1))
+        if not departure_city or not arrival_city or not travel_date:
+            return {"transport_summary": "", "hotel_summary": ""}
+        trip_end_date = (datetime.strptime(travel_date, "%Y-%m-%d") + timedelta(days=max(stay_days, 1))).strftime("%Y-%m-%d")
+
+        conn = None
+        cursor = None
+        try:
+            conn = get_db_connection(self.config)
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT
+                    order_type,
+                    departure_city,
+                    arrival_city,
+                    departure_time,
+                    transport_no,
+                    hotel_name,
+                    stay_nights,
+                    ticket_or_room_type,
+                    quantity,
+                    total_price
+                FROM orders o
+                JOIN users u ON u.id = o.user_id
+                WHERE u.username = %s
+                  AND o.status = 'booked'
+                  AND (
+                    (
+                      o.order_type IN ('train', 'flight')
+                      AND DATE(o.departure_time) = %s
+                      AND o.departure_city = %s
+                      AND o.arrival_city = %s
+                    )
+                    OR
+                    (
+                      o.order_type = 'hotel'
+                      AND o.departure_city = %s
+                      AND DATE(o.departure_time) < %s
+                      AND DATE_ADD(DATE(o.departure_time), INTERVAL COALESCE(o.stay_nights, 0) DAY) > %s
+                    )
+                  )
+                ORDER BY o.departure_time ASC, o.id ASC
+                """,
+                (
+                    self.current_username,
+                    travel_date,
+                    departure_city,
+                    arrival_city,
+                    arrival_city,
+                    trip_end_date,
+                    travel_date,
+                ),
+            )
+            rows = cursor.fetchall()
+        except Exception as exc:
+            logger.warning(f"读取 travel_plan 关联订单失败: {exc}")
+            return {"transport_summary": "", "hotel_summary": ""}
+        finally:
+            if cursor is not None:
+                cursor.close()
+            if conn is not None and conn.is_connected():
+                conn.close()
+
+        transport_parts: list[str] = []
+        hotel_parts: list[str] = []
+        for row in rows or []:
+            if row["order_type"] == "hotel":
+                check_in_date = str(row["departure_time"])[:10]
+                check_out_date = (
+                    datetime.strptime(check_in_date, "%Y-%m-%d") + timedelta(days=int(row["stay_nights"] or 0))
+                ).strftime("%Y-%m-%d")
+                hotel_parts.append(
+                    f"{check_in_date} 入住，{check_out_date} 离店，{row['departure_city']} {row['hotel_name']}，"
+                    f"{row['ticket_or_room_type']} {row['quantity']}间，{row['stay_nights']}晚，总价 {row['total_price']} 元"
                 )
             else:
-                sections.append("预订结果：由于前一步没有查到可用票务数据，本次没有继续提交订票请求。")
-
-        if weather_result.degraded:
-            sections.insert(0, "协作降级：天气服务暂时不可用，当前建议基于保守策略继续完成票务协作。")
-        elif weather_result.no_data:
-            sections.insert(0, "天气数据提醒：当前数据库里没有命中对应日期的天气数据，以下建议基于缺失天气数据时的保守策略。")
-
+                transport_parts.append(
+                    f"{str(row['departure_time'])} {row['departure_city']}到{row['arrival_city']} "
+                    f"{row['transport_no']} {row['ticket_or_room_type']} {row['quantity']}张，总价 {row['total_price']} 元"
+                )
         return {
-            "response": "\n\n".join(sections),
-            "intents": intents,
-            "routed_agents": routed_agents,
-            "pending_context": {},
+            "transport_summary": "；".join(transport_parts),
+            "hotel_summary": "；".join(hotel_parts),
         }
+
+    @staticmethod
+    def _route_travel_plan_after_prepare(state: TravelPlanWorkflowState) -> str:
+        return "finish" if state.get("final_state") == "input_required" else "weather"
+
+    @staticmethod
+    def _route_travel_plan_after_ticket(state: TravelPlanWorkflowState) -> str:
+        if str(state.get("hotel_query", "")).strip() or str(state.get("existing_hotel_summary", "")).strip():
+            return "hotel"
+        if state.get("should_order"):
+            return "order"
+        return "finalize"
+
+    @staticmethod
+    def _route_travel_plan_after_hotel(state: TravelPlanWorkflowState) -> str:
+        return "order" if state.get("should_order") else "finalize"
 
     def _extract_travel_plan_state(
         self,
@@ -476,12 +736,12 @@ class SmartVoyageOrchestrator:
     def _travel_plan_follow_up_message(
         self,
         missing_slots: list[str],
-        user_profile: UserPreferenceProfile,
+        home_city: str,
     ) -> str:
-        if missing_slots == ["departure_city"] and user_profile.home_city:
+        if missing_slots == ["departure_city"] and home_city:
             return (
-                f"你这次是从{user_profile.home_city}出发吗？"
-                f"如果按你的常住地{user_profile.home_city}出发，我可以继续给你做交通和酒店联动方案；"
+                f"你这次是从{home_city}出发吗？"
+                f"如果按你的常住地{home_city}出发，我可以继续给你做交通和酒店联动方案；"
                 "如果不是，请直接告诉我出发城市。"
             )
         labels = {

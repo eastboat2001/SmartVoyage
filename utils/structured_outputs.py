@@ -36,18 +36,19 @@ class IntentRecognitionResult(BaseModel):
 class TravelPlanResult(BaseModel):
     transport_mode: Literal["train", "flight"]
     weather_brief: str = ""
+    trip_status_summary: str
     recommendation_reason: str
-    ticket_query: str
+    ticket_query: str = ""
     hotel_query: str = ""
     hotel_reason: str = ""
     should_order: bool = False
 
     @model_validator(mode="after")
     def validate_payload(self):
+        if not self.trip_status_summary.strip():
+            raise ValueError("trip_status_summary is required")
         if not self.recommendation_reason.strip():
             raise ValueError("recommendation_reason is required")
-        if not self.ticket_query.strip():
-            raise ValueError("ticket_query is required")
         if self.hotel_query.strip() and not self.hotel_reason.strip():
             raise ValueError("hotel_reason is required when hotel_query is provided")
         return self

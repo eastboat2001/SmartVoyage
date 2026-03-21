@@ -116,13 +116,16 @@ class SmartVoyagePrompts:
 
 规则：
 - 必须在 train 或 flight 中二选一，给出推荐 transport_mode。
+- 必须输出 `trip_status_summary`，明确说明“当前交通和住宿是否已齐备、还缺哪一段”。这个判断要结合用户请求里的行程时长，以及当前已预订交通/酒店订单做推理。
 - 要综合考虑用户偏好画像；如果用户偏好与天气或票务现实条件冲突，优先给出现实可执行的建议，并在 recommendation_reason 里说明权衡。
 - 如果天气结果不可用，也要继续给出保守建议，但要在 recommendation_reason 中明确说明这是在天气缺失下的降级判断。
 - weather_brief 用 1 句话总结天气影响；如果天气不可用，说明“天气服务暂不可用”。
-- ticket_query 必须是一个可以直接发送给票务查询 Agent 的完整中文查询。
-- 如果用户请求本身明显涉及“旅游方案 / 玩几天 / 住宿 / 酒店 / 行程规划”，并且已经明确了目的地和入住日期，请生成 hotel_query，作为可以直接发送给酒店 Agent 的完整中文查询；否则 hotel_query 置空字符串。
+- 当交通尚未覆盖或还需补足交通方案时，ticket_query 必须是一个可以直接发送给票务查询 Agent 的完整中文查询；如果交通已经齐备且不需要再补票，ticket_query 可以为空字符串。
+- 如果用户请求本身明显涉及“旅游方案 / 玩几天 / 住宿 / 酒店 / 行程规划”，并且当前住宿尚未覆盖或还需补足住宿缺口，且已经明确了目的地和入住日期，请生成 hotel_query，作为可以直接发送给酒店 Agent 的完整中文查询；否则 hotel_query 置空字符串。
 - 如果生成了 hotel_query，hotel_reason 必须简要说明为什么当前住宿条件合适；如果 hotel_query 为空，hotel_reason 也置空字符串。
 - 如果用户已经明确要求订票，则 should_order=true；如果只是查票或比价，则 should_order=false。
+- 如果当前已预订订单已经覆盖了交通或住宿，就要在 `trip_status_summary` 里明确指出；例如用户要玩两天，但酒店订单只有 1 晚，也必须明确提醒“住宿还缺 1 晚”。
+- 如果交通或住宿已齐备，不要再把它说成“尚未安排”；如果只缺一部分，可以继续生成对应的 `ticket_query` 或 `hotel_query` 用于补足缺口。
 - 不要虚构具体车次、航班号、站点、舱位余票、出发时段等数据库中未明确给出的细节。票务查询阶段应优先生成较宽松、可命中的查询条件。
 - 酒店查询阶段也不要虚构酒店名、商圈、评分或设施，只生成宽松且可命中的查询，例如“查询2026-03-21上海的酒店”。
 - 如果用户画像里有常住地信息，也不能直接替用户补全出发地；只有当用户请求本身已经明确出发地时，才能把它写进 ticket_query 和 recommendation_reason。禁止写出“按常住地默认从北京出发”这类推断。
@@ -131,6 +134,9 @@ class SmartVoyagePrompts:
 用户请求：{query}
 天气结果：{weather_result}
 用户偏好画像：{user_preferences}
+当前已预订交通订单：{existing_transport_orders}
+当前已预订酒店订单：{existing_hotel_orders}
+本次行程天数：{stay_days}
 当前日期：{current_date} (Asia/Shanghai)
 """)
 
