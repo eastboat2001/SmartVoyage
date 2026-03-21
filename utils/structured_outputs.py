@@ -38,6 +38,8 @@ class TravelPlanResult(BaseModel):
     weather_brief: str = ""
     recommendation_reason: str
     ticket_query: str
+    hotel_query: str = ""
+    hotel_reason: str = ""
     should_order: bool = False
 
     @model_validator(mode="after")
@@ -46,15 +48,41 @@ class TravelPlanResult(BaseModel):
             raise ValueError("recommendation_reason is required")
         if not self.ticket_query.strip():
             raise ValueError("ticket_query is required")
+        if self.hotel_query.strip() and not self.hotel_reason.strip():
+            raise ValueError("hotel_reason is required when hotel_query is provided")
         return self
 
 
 class PendingContextPayload(BaseModel):
-    domain: Literal["order", "hotel"]
+    domain: Literal["order", "hotel", "travel_plan"]
     action: str
     missing_slots: list[str] = Field(default_factory=list)
     slots: dict[str, Any] = Field(default_factory=dict)
     original_query: str = ""
+
+
+class TravelPlanWorkflowExtractionResult(BaseModel):
+    domain: Literal["travel_plan"] = "travel_plan"
+    action: Literal["plan_trip"] = "plan_trip"
+    departure_city: str = ""
+    arrival_city: str = ""
+    travel_date: str = ""
+    stay_days: int = 1
+    include_hotel: bool = False
+    should_order: bool = False
+    missing_slots: list[str] = Field(default_factory=list)
+    follow_up_message: str = ""
+    is_complete: bool = False
+
+    @model_validator(mode="after")
+    def validate_payload(self):
+        if self.stay_days <= 0:
+            self.stay_days = 1
+        if self.is_complete and self.missing_slots:
+            raise ValueError("complete extraction should not contain missing_slots")
+        if not self.is_complete and not self.follow_up_message.strip():
+            raise ValueError("incomplete extraction requires follow_up_message")
+        return self
 
 
 class OrderWorkflowExtractionResult(BaseModel):

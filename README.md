@@ -47,6 +47,10 @@ SmartVoyage 是一个基于 A2A + MCP + LangGraph 的旅行助手示例项目，
   - 已支持查询酒店订单 / 在统一订单视图中展示酒店订单
   - 已支持按用户画像中的预算偏好对酒店结果做排序
   - 订单域 / 酒店域已统一到 `LangGraph state + LLM 结构化抽取 slots + 后端强校验 + pending_context 多轮补参 + MCP/tool 执行`
+- 已完成 P5 的第一版最小落地
+  - 已支持 `travel_plan` 输出天气 + 交通 + 酒店联动建议
+  - 已支持在统一编排层中串起 `Weather -> Ticket -> Hotel`
+  - 已支持对“玩几天 / 住宿 / 酒店方案”类请求生成联动酒店查询
 - 当前支持两种模型提供方式：
   - `openai_compatible`
   - `ollama`
@@ -151,10 +155,12 @@ SmartVoyage 是一个基于 A2A + MCP + LangGraph 的旅行助手示例项目，
   - 改签
   - 退票/改签缺字段时的多轮补参
   - 基于用户偏好的 `travel_plan` 个性化推荐
+  - 基于天气、交通、酒店的联动 `travel_plan` 方案输出
   - 出发地缺失时，基于 `home_city` 的确认性追问
 - 当前尚未支持：
   - 登录/切换用户
-  - 酒店深度接入 `travel_plan`
+  - `travel_plan` 内一键联动下单酒店
+  - `travel_plan` 内更细的每日行程规划
   - 模糊改签（如“改签到下午”）
   - 完整持久化的用户画像采集与维护流程
 
@@ -506,6 +512,7 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
 查询2026-03-21北京到杭州的机票
 根据2026-03-21杭州的天气，帮我判断从北京去杭州更适合坐高铁还是飞机，并查询对应票务
 根据2026-03-21上海的天气，帮我判断从北京去上海坐高铁还是飞机更合适，如果有合适票就直接帮我订一张
+结合2026-03-21上海开始两天的天气、交通和酒店，帮我做一个出行方案
 帮我预订2026-03-21北京到上海的高铁票，二等座1张
 查询我的订单
 查询我的酒店订单
@@ -523,6 +530,7 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
 说明：
 
 - `travel_plan` 协作链路建议优先测试北京到杭州、北京到上海。
+- P5 第一版联动规划建议优先测试“结合2026-03-21上海开始两天的天气、交通和酒店，帮我做一个出行方案”。
 - 如果你临时修改了 `sql/insert_data.sql`，记得重新导入数据库后再测试。
 
 
@@ -616,6 +624,7 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
   - 先查天气
   - 再基于天气和用户偏好画像决策高铁或飞机
   - 然后继续查票，必要时继续订票
+  - 在用户请求涉及住宿/玩几天/酒店方案时，继续补充酒店查询与住宿建议
 - 当用户未明确出发地但画像里存在 `home_city` 时
   - 会先做确认性追问
   - 不会直接把 `home_city` 自动补全进查询或下单参数
@@ -627,6 +636,10 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
   - 核心字段：`domain / action / slots / missing_slots / pending_context / execution_payload`
   - 入口编排层只负责 intent 识别和路由，不再让子域继续走独立关键词分支判断
   - 对“我的机票和酒店”“我的火车票和酒店”这类表达，入口层会优先收敛为单一 `my_orders`，避免被错误拆成 `my_orders + hotel`
+- `travel_plan` 也已开始按同样思路拆分域内状态
+  - 先做 `travel_plan` 槽位抽取，再由后端判断 `missing_slots`
+  - 当前全局编排层只保留最小跨域上下文，不再承担 `travel_plan` 的主字段解析
+  - `travel_plan` 当前最小核心字段：`departure_city / arrival_city / travel_date / stay_days / include_hotel / should_order`
 - 订单域 LangGraph 流程
   - `prepare -> query_orders | cancel_order | change_order | lookup_tickets -> create_order`
   - `prepare` 节点统一由 LLM 产出 action 与 slots，再由后端计算缺失字段、生成追问和执行 payload

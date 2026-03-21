@@ -6,9 +6,11 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 import pytz
 from python_a2a import AgentNetwork, Message, MessageRole, Task, TextContent
+from typing_extensions import TypedDict
 
 from config import Config
 from create_logger import logger
@@ -17,7 +19,9 @@ from utils.db import get_db_connection
 from utils.resilient_llm import ResilientModelInvoker
 from utils.structured_outputs import (
     IntentRecognitionResult,
+    PendingContextPayload,
     TravelPlanResult,
+    TravelPlanWorkflowExtractionResult,
 )
 
 
@@ -37,6 +41,13 @@ class AgentExecutionResult:
     degraded: bool = False
     no_data: bool = False
     pending_context: dict | None = None
+
+
+class TravelPlanState(TypedDict):
+    action: str
+    slots: dict[str, Any]
+    missing_slots: list[str]
+    original_query: str
 
 
 @dataclass
@@ -206,7 +217,7 @@ class SmartVoyageOrchestrator:
         pending_context: dict | None = None,
     ) -> dict:
         user_profile = self._load_user_preferences()
-        precheck_follow_up = self._precheck_home_city_follow_up(prompt, user_profile)
+        precheck_follow_up = self._precheck_home_city_follow_up(prompt, user_profile, pending_context or {})
         if precheck_follow_up:
             return {
                 "response": precheck_follow_up,
@@ -245,7 +256,7 @@ class SmartVoyageOrchestrator:
                 "pending_context": pending_context,
             }
 
-        home_city_follow_up = self._maybe_follow_up_with_home_city(intents, user_queries, user_profile)
+        home_city_follow_up = self._maybe_follow_up_with_home_city(intents, user_queries, user_profile, pending_context)
         if home_city_follow_up:
             return {
                 "response": home_city_follow_up,
@@ -255,8 +266,7 @@ class SmartVoyageOrchestrator:
             }
 
         if "travel_plan" in intents:
-            result = self._handle_travel_plan(prompt, conversation_history, user_queries, intents, user_profile)
-            result["pending_context"] = {}
+            result = self._handle_travel_plan(prompt, conversation_history, user_queries, intents, user_profile, pending_context)
             return result
 
         responses: list[str] = []
@@ -305,9 +315,25 @@ class SmartVoyageOrchestrator:
         user_queries: dict[str, str],
         intents: list[str],
         user_profile: UserPreferenceProfile,
+        pending_context: dict | None,
     ) -> dict:
-        weather_query = user_queries.get("weather", prompt)
         travel_query = user_queries.get("travel_plan", prompt)
+        travel_state = self._extract_travel_plan_state(
+            query=travel_query,
+            conversation_history=conversation_history,
+            pending_context=pending_context or {},
+        )
+        if travel_state["missing_slots"]:
+            return {
+                "response": self._travel_plan_follow_up_message(travel_state["missing_slots"], user_profile),
+                "intents": intents,
+                "routed_agents": [],
+                "pending_context": self._build_travel_plan_pending_context(travel_state),
+            }
+
+        slots = travel_state["slots"]
+        weather_query = self._build_weather_query(slots)
+        normalized_travel_query = self._build_travel_plan_query(slots)
         weather_result = self._call_agent(
             "WeatherQueryAssistant",
             weather_query,
@@ -328,7 +354,7 @@ class SmartVoyageOrchestrator:
             SmartVoyagePrompts.travel_planner_prompt(),
             TravelPlanResult,
             {
-                "query": travel_query,
+                "query": normalized_travel_query,
                 "weather_result": weather_text,
                 "user_preferences": user_profile.summary_text(),
                 "current_date": datetime.now(pytz.timezone("Asia/Shanghai")).strftime("%Y-%m-%d"),
@@ -349,10 +375,24 @@ class SmartVoyageOrchestrator:
             f"票务结果：{self._finalize_agent_response('TicketQueryAssistant', plan.ticket_query, ticket_result)}",
         ]
 
+        if plan.hotel_query.strip():
+            hotel_query = self._with_user_context("hotel", plan.hotel_query)
+            hotel_result = self._call_agent(
+                "HotelAssistant",
+                hotel_query,
+                conversation_history,
+            )
+            routed_agents.append("HotelAssistant")
+            hotel_intro = f"住宿建议：{plan.hotel_reason}" if plan.hotel_reason.strip() else "住宿建议：已结合当前行程补充酒店候选。"
+            sections.append(hotel_intro)
+            sections.append(
+                f"酒店结果：{self._finalize_agent_response('HotelAssistant', hotel_query, hotel_result)}"
+            )
+
         if plan.should_order:
             if ticket_result.state == "completed":
                 order_query = self._build_order_query(
-                    travel_query=travel_query,
+                    travel_query=normalized_travel_query,
                     transport_mode=plan.transport_mode,
                     ticket_result_text=ticket_result.text,
                 )
@@ -378,18 +418,116 @@ class SmartVoyageOrchestrator:
             "response": "\n\n".join(sections),
             "intents": intents,
             "routed_agents": routed_agents,
+            "pending_context": {},
         }
+
+    def _extract_travel_plan_state(
+        self,
+        *,
+        query: str,
+        conversation_history: str,
+        pending_context: dict,
+    ) -> TravelPlanState:
+        pending_slots = pending_context.get("slots", {}) if pending_context.get("domain") == "travel_plan" else {}
+        extraction = self.invoker.invoke_structured(
+            SmartVoyagePrompts.travel_plan_workflow_extraction_prompt(),
+            TravelPlanWorkflowExtractionResult,
+            {
+                "conversation_history": "\n".join(conversation_history.split("\n")[-6:]),
+                "query": query,
+                "current_date": datetime.now(pytz.timezone("Asia/Shanghai")).strftime("%Y-%m-%d"),
+                "pending_context": json.dumps(pending_context, ensure_ascii=False) if pending_context else "无",
+            },
+            description="travel_plan 状态抽取",
+        )
+        slots: dict[str, str | int | bool] = dict(pending_slots) if isinstance(pending_slots, dict) else {}
+        explicit_slots = {
+            "departure_city": extraction.departure_city,
+            "arrival_city": extraction.arrival_city,
+            "travel_date": extraction.travel_date,
+            "stay_days": extraction.stay_days,
+            "include_hotel": extraction.include_hotel,
+            "should_order": extraction.should_order,
+        }
+        for key, value in explicit_slots.items():
+            if isinstance(value, str):
+                if value.strip():
+                    slots[key] = value.strip()
+            else:
+                slots[key] = value
+        if int(slots.get("stay_days", 1)) <= 0:
+            slots["stay_days"] = 1
+        missing_slots = self._compute_travel_plan_missing_slots(slots)
+        return {
+            "action": "plan_trip",
+            "slots": slots,
+            "missing_slots": missing_slots,
+            "original_query": query,
+        }
+
+    @staticmethod
+    def _compute_travel_plan_missing_slots(slots: dict[str, str | int | bool]) -> list[str]:
+        missing: list[str] = []
+        for field in ("departure_city", "arrival_city", "travel_date"):
+            if not str(slots.get(field, "")).strip():
+                missing.append(field)
+        return missing
+
+    def _travel_plan_follow_up_message(
+        self,
+        missing_slots: list[str],
+        user_profile: UserPreferenceProfile,
+    ) -> str:
+        if missing_slots == ["departure_city"] and user_profile.home_city:
+            return (
+                f"你这次是从{user_profile.home_city}出发吗？"
+                f"如果按你的常住地{user_profile.home_city}出发，我可以继续给你做交通和酒店联动方案；"
+                "如果不是，请直接告诉我出发城市。"
+            )
+        labels = {
+            "departure_city": "出发城市",
+            "arrival_city": "目的地城市",
+            "travel_date": "出发日期",
+        }
+        joined = "、".join(labels[item] for item in missing_slots if item in labels) or "出行规划信息"
+        return f"请补充{joined}，我再继续帮你做交通和酒店联动方案。"
+
+    @staticmethod
+    def _build_travel_plan_pending_context(state: TravelPlanState) -> dict:
+        payload = PendingContextPayload(
+            domain="travel_plan",
+            action=state["action"],
+            missing_slots=state["missing_slots"],
+            slots=state["slots"],
+            original_query=state["original_query"],
+        )
+        return payload.model_dump()
+
+    @staticmethod
+    def _build_weather_query(slots: dict[str, str | int | bool]) -> str:
+        return f"查询{slots['arrival_city']}{slots['travel_date']}的天气"
+
+    @staticmethod
+    def _build_travel_plan_query(slots: dict[str, str | int | bool]) -> str:
+        base = f"结合{slots['travel_date']}{slots['departure_city']}到{slots['arrival_city']}的交通方案"
+        if bool(slots.get("include_hotel", False)):
+            days = int(slots.get("stay_days", 1))
+            return f"{base}，并结合{slots['arrival_city']}从{slots['travel_date']}开始{days}天的酒店住宿，帮我做一个出行方案"
+        return f"{base}，帮我做一个出行方案"
 
     def _maybe_follow_up_with_home_city(
         self,
         intents: list[str],
         user_queries: dict[str, str],
         user_profile: UserPreferenceProfile,
+        pending_context: dict,
     ) -> str:
         if not user_profile.home_city:
             return ""
+        if pending_context.get("domain") == "travel_plan":
+            return ""
 
-        target_intent = next((intent for intent in intents if intent in {"flight", "train", "order", "travel_plan"}), "")
+        target_intent = next((intent for intent in intents if intent in {"flight", "train", "order"}), "")
         if not target_intent:
             return ""
 
@@ -405,8 +543,10 @@ class SmartVoyageOrchestrator:
             f"如果按你的常住地{user_profile.home_city}出发，我可以继续帮你查票或做出行建议。"
         )
 
-    def _precheck_home_city_follow_up(self, prompt: str, user_profile: UserPreferenceProfile) -> str:
+    def _precheck_home_city_follow_up(self, prompt: str, user_profile: UserPreferenceProfile, pending_context: dict) -> str:
         if not user_profile.home_city:
+            return ""
+        if pending_context.get("domain") == "travel_plan":
             return ""
         normalized = prompt.strip()
         if not normalized:
@@ -544,7 +684,7 @@ class SmartVoyageOrchestrator:
 
     @staticmethod
     def _has_pending_domain_intent(intents: list[str]) -> bool:
-        return any(intent in {"order", "my_orders", "cancel_order", "change_order", "hotel"} for intent in intents)
+        return any(intent in {"order", "my_orders", "cancel_order", "change_order", "hotel", "travel_plan"} for intent in intents)
 
     def _merge_pending_context(
         self,
@@ -558,7 +698,7 @@ class SmartVoyageOrchestrator:
         if not pending_context:
             return intents, user_queries, follow_up_message, {}
 
-        if any(intent in {"weather", "flight", "train", "travel_plan", "attraction"} for intent in intents):
+        if any(intent in {"weather", "flight", "train", "attraction"} for intent in intents):
             return intents, user_queries, follow_up_message, {}
 
         if self._has_pending_domain_intent(intents):
@@ -640,6 +780,8 @@ class SmartVoyageOrchestrator:
             r"[\u4e00-\u9fa5]{2,10}到[\u4e00-\u9fa5]{2,10}",
             r"从[\u4e00-\u9fa5]{2,10}去[\u4e00-\u9fa5]{2,10}",
             r"[\u4e00-\u9fa5]{2,10}飞[\u4e00-\u9fa5]{2,10}",
+            r"从[\u4e00-\u9fa5]{2,10}出发",
+            r"[\u4e00-\u9fa5]{2,10}出发",
         ]
         return any(re.search(pattern, normalized) for pattern in patterns)
 
@@ -656,6 +798,19 @@ class SmartVoyageOrchestrator:
             "去",
             "坐高铁",
             "坐飞机",
+        )
+        return any(keyword in query for keyword in keywords)
+
+    @staticmethod
+    def _looks_like_travel_plan_query(query: str) -> bool:
+        keywords = (
+            "交通",
+            "酒店",
+            "住宿",
+            "行程",
+            "方案",
+            "玩几天",
+            "出行方案",
         )
         return any(keyword in query for keyword in keywords)
 

@@ -9,10 +9,10 @@ class SmartVoyagePrompts:
         return ChatPromptTemplate.from_template(
 """
 系统提示：您是一个专业的旅行意图识别专家，基于用户查询和对话历史，识别其意图，用于调用专门的agent server来执行；为方便后续的agent server处理，可以基于对话历史对用户查询进行改写，使问题更明确。严格遵守规则：
-- 支持意图：['weather' (天气查询), 'flight' (机票查询), 'train' (高铁/火车票查询), 'hotel' (酒店查询/酒店预订/酒店取消/酒店改期), 'order' (交通票务预定), 'my_orders' (查询我的订单，包含交通票和酒店订单), 'cancel_order' (退票), 'change_order' (改签/改票), 'travel_plan' (基于天气/行程综合推荐出行方式并继续查票或订票), 'attraction' (景点推荐)] 或其组合（如 ['weather', 'flight']）。如果意图超出范围，返回意图 'out_of_scope'。
+- 支持意图：['weather' (天气查询), 'flight' (机票查询), 'train' (高铁/火车票查询), 'hotel' (酒店查询/酒店预订/酒店取消/酒店改期), 'order' (交通票务预定), 'my_orders' (查询我的订单，包含交通票和酒店订单), 'cancel_order' (退票), 'change_order' (改签/改票), 'travel_plan' (基于天气/交通/酒店做综合出行或行程规划，并可继续查票或订票), 'attraction' (景点推荐)] 或其组合（如 ['weather', 'flight']）。如果意图超出范围，返回意图 'out_of_scope'。
 - 注意票务预定、票务查询、订单查询、退票、改签要区分开，涉及到下单时则为order，只是查询交通票则为flight/train，查询“我的订单/我订了哪些票/我的酒店订单/我的机票和酒店/我的火车票和酒店”这类已预订订单时统一为my_orders；只有明确是交通票务退票时才识别为cancel_order，只有明确是交通票务改签/改票时才识别为change_order。
 - 只有“查酒店库存/订酒店/推荐酒店/住哪里/取消酒店/退掉酒店/取消我订的某酒店/酒店改期/把酒店改到某天/改酒店房型”这类酒店查询、预订或酒店订单生命周期请求，才识别为 hotel；不要把“我的酒店订单”“查询我的酒店”“查询我的机票和酒店”这类订单查询识别成 hotel。
-- 如果用户明确表达“根据天气推荐坐高铁还是飞机、再帮我查票/订票”这类跨 Agent 协作需求，优先识别为 travel_plan。识别为 travel_plan 时：
+- 如果用户明确表达“根据天气推荐坐高铁还是飞机、再帮我查票/订票”或“结合天气、交通、酒店做方案/玩几天/住哪里”这类跨 Agent 协作需求，优先识别为 travel_plan。识别为 travel_plan 时：
   1. user_queries['travel_plan'] 写整合后的规划请求；
   2. 如果需要先查天气，再额外补充 user_queries['weather']，供天气 agent 使用；
   3. 不要再单独输出 flight/train/order，除非用户还明确提出了与规划无关的额外需求。
@@ -31,6 +31,7 @@ class SmartVoyagePrompts:
 {{"intents": ["cancel_order"], "user_queries": {{"cancel_order": "帮我退掉2026-03-21北京到上海的高铁票"}}, "follow_up_message": ""}}
 {{"intents": ["change_order"], "user_queries": {{"change_order": "把我2026-03-21北京到上海的高铁票改签到2026-03-22二等座"}}, "follow_up_message": ""}}
 {{"intents": ["travel_plan"], "user_queries": {{"travel_plan": "根据杭州明天的天气，帮我判断从北京去杭州更适合坐高铁还是飞机，并查询对应票务", "weather": "查询杭州明天的天气"}}, "follow_up_message": ""}}
+{{"intents": ["travel_plan"], "user_queries": {{"travel_plan": "结合上海2026-03-21开始两天的天气、交通和酒店，帮我做一个出行方案", "weather": "查询上海2026-03-21的天气"}}, "follow_up_message": ""}}
 {{"intents": ["hotel"], "user_queries": {{"hotel": "查询2026-03-21上海的酒店"}}, "follow_up_message": ""}}
 {{"intents": ["hotel"], "user_queries": {{"hotel": "取消我订的2026-03-21上海外滩云际酒店"}}, "follow_up_message": ""}}
 {{"intents": ["hotel"], "user_queries": {{"hotel": "把我2026-03-21上海外滩云际酒店改到2026-03-22"}}, "follow_up_message": ""}}
@@ -111,6 +112,7 @@ class SmartVoyagePrompts:
         return ChatPromptTemplate.from_template(
 """
 系统提示：你是 SmartVoyage 的出行协作规划器。你需要根据用户请求、天气结果和上下文，在“天气 Agent -> 票务 Agent -> 订票 Agent”之间做衔接决策。
+在当前第一版 P5 里，你还需要在合适时给出酒店查询建议，让编排层执行“天气 Agent -> 票务 Agent -> 酒店 Agent”的联动规划。
 
 规则：
 - 必须在 train 或 flight 中二选一，给出推荐 transport_mode。
@@ -118,9 +120,12 @@ class SmartVoyagePrompts:
 - 如果天气结果不可用，也要继续给出保守建议，但要在 recommendation_reason 中明确说明这是在天气缺失下的降级判断。
 - weather_brief 用 1 句话总结天气影响；如果天气不可用，说明“天气服务暂不可用”。
 - ticket_query 必须是一个可以直接发送给票务查询 Agent 的完整中文查询。
+- 如果用户请求本身明显涉及“旅游方案 / 玩几天 / 住宿 / 酒店 / 行程规划”，并且已经明确了目的地和入住日期，请生成 hotel_query，作为可以直接发送给酒店 Agent 的完整中文查询；否则 hotel_query 置空字符串。
+- 如果生成了 hotel_query，hotel_reason 必须简要说明为什么当前住宿条件合适；如果 hotel_query 为空，hotel_reason 也置空字符串。
 - 如果用户已经明确要求订票，则 should_order=true；如果只是查票或比价，则 should_order=false。
 - 不要虚构具体车次、航班号、站点、舱位余票、出发时段等数据库中未明确给出的细节。票务查询阶段应优先生成较宽松、可命中的查询条件。
-- 如果用户画像里有常住地信息，也不能直接替用户补全出发地；只有当用户请求本身已经明确出发地时，才能把它写进 ticket_query。
+- 酒店查询阶段也不要虚构酒店名、商圈、评分或设施，只生成宽松且可命中的查询，例如“查询2026-03-21上海的酒店”。
+- 如果用户画像里有常住地信息，也不能直接替用户补全出发地；只有当用户请求本身已经明确出发地时，才能把它写进 ticket_query 和 recommendation_reason。禁止写出“按常住地默认从北京出发”这类推断。
 - 不要输出 markdown，不要补充结构化字段以外的内容。
 
 用户请求：{query}
@@ -128,6 +133,37 @@ class SmartVoyagePrompts:
 用户偏好画像：{user_preferences}
 当前日期：{current_date} (Asia/Shanghai)
 """)
+
+    @staticmethod
+    def travel_plan_workflow_extraction_prompt():
+        return ChatPromptTemplate.from_template(
+"""
+系统提示：你是 SmartVoyage 的 travel_plan 域状态抽取器。你的任务是只基于当前用户输入、最近对话和待补上下文，抽取规划所需的最小槽位，供后端决定是否继续追问、查天气、查交通和查酒店。
+
+严格规则：
+- 这是 travel_plan 域的唯一结构化入口；不要依赖关键词规则脑补城市、日期或天数。
+- 只抽取用户明确表达过的信息；不能根据用户画像、历史经验或常识自动补全出发地、目的地、日期。
+- 只允许输出 action=`plan_trip`。
+- 字段含义：
+  - `departure_city`：用户明确说出的出发城市。
+  - `arrival_city`：用户明确说出的目的地城市。
+  - `travel_date`：用户明确说出的出发/入住起始日期，统一 YYYY-MM-DD；未明确则留空。
+  - `stay_days`：用户明确说“玩两天/住两晚/两天行程”时填写；未明确则默认 1。
+  - `include_hotel`：当用户明确提到酒店/住宿/住哪里/行程方案包含住宿时为 true，否则 false。
+  - `should_order`：只有用户明确要求“有合适票就直接订/直接帮我订票”时才为 true，否则 false。
+- 最小进入后端条件：`departure_city + arrival_city + travel_date`。否则应 `is_complete=false`，并给出缺失字段追问。
+- 如果用户补充的是“从北京出发”这类信息，要把它只写入 `departure_city`，不要篡改其他字段。
+- 如果用户只说“去上海玩两天”，那么 arrival_city=上海，stay_days=2，其余未明确字段保持为空。
+- 当 `is_complete=false` 时，必须给出简洁中文 follow_up_message，并列出 missing_slots。
+- 不要输出 markdown，不要补充结构化字段以外的解释。
+
+可用上下文：
+- 最近对话：{conversation_history}
+- 当前用户输入：{query}
+- 当前日期：{current_date} (Asia/Shanghai)
+- 待补上下文摘要：{pending_context}
+"""
+        )
 
     @staticmethod
     def order_workflow_extraction_prompt():
