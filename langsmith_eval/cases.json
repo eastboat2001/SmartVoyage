@@ -1,0 +1,124 @@
+[
+  {
+    "id": "tc_011_query_current_orders",
+    "description": "查询当前订单应统一返回当前用户全部已预订订单。",
+    "turns": [
+      "查询当前订单"
+    ],
+    "expected": {
+      "intents": ["my_orders"],
+      "routed_agents": ["TicketOrderAssistant"],
+      "response_keywords_all": ["已预订订单如下"],
+      "response_keywords_any": ["高铁票", "酒店"],
+      "pending_domain": "",
+      "pending_empty": true
+    }
+  },
+  {
+    "id": "tc_020_query_hotel",
+    "description": "查询酒店应进入酒店域并体现预算画像排序说明。",
+    "turns": [
+      "查询2026-03-21上海的酒店"
+    ],
+    "expected": {
+      "intents": ["hotel"],
+      "routed_agents": ["HotelAssistant"],
+      "response_keywords_all": ["排序偏好", "预算画像", "上海外滩云际酒店"],
+      "response_keywords_any": [],
+      "pending_domain": "",
+      "pending_empty": true
+    }
+  },
+  {
+    "id": "tc_032_travel_plan_missing_departure",
+    "description": "travel_plan 缺出发地时应返回 travel_plan 域追问。",
+    "turns": [
+      "结合2026-03-21上海开始两天的天气、交通和酒店，帮我做一个出行方案"
+    ],
+    "expected": {
+      "intents": [],
+      "routed_agents": [],
+      "response_keywords_all": ["出发吗", "交通和酒店联动方案"],
+      "response_keywords_any": [],
+      "pending_domain": "travel_plan",
+      "pending_empty": false
+    }
+  },
+  {
+    "id": "tc_032b_travel_plan_resume_after_departure",
+    "description": "travel_plan 补充出发地后应继续执行，而不是重复追问。",
+    "turns": [
+      "结合2026-03-21上海开始两天的天气、交通和酒店，帮我做一个出行方案",
+      "从北京出发"
+    ],
+    "expected": {
+      "intents": ["travel_plan"],
+      "routed_agents_any": ["WeatherQueryAssistant", "TicketQueryAssistant"],
+      "response_keywords_all": ["当前行程状态", "天气判断", "出行建议"],
+      "response_keywords_any": ["票务结果", "酒店结果"],
+      "response_keywords_none": ["你这次是从北京出发吗"],
+      "pending_domain": "",
+      "pending_empty": true
+    }
+  },
+  {
+    "id": "tc_040_travel_plan_full_plan",
+    "description": "travel_plan 应输出天气、交通、酒店联动方案。",
+    "turns": [
+      "从北京出发结合2026-03-21上海开始两天的天气、交通和酒店，帮我做一个出行方案"
+    ],
+    "expected": {
+      "intents": ["travel_plan"],
+      "routed_agents_any": ["WeatherQueryAssistant", "TicketQueryAssistant"],
+      "response_keywords_all": ["当前行程状态", "天气判断", "出行建议"],
+      "response_keywords_any": ["票务结果", "酒店结果"],
+      "pending_domain": "",
+      "pending_empty": true
+    }
+  },
+  {
+    "id": "tc_041_travel_plan_existing_transport",
+    "description": "travel_plan 应识别已有关联交通订单，不再把交通当成未安排。",
+    "turns": [
+      "从北京出发结合2026-03-21上海开始两天的天气、交通和酒店，帮我做一个出行方案"
+    ],
+    "expected": {
+      "intents": ["travel_plan"],
+      "routed_agents_any": ["WeatherQueryAssistant"],
+      "response_keywords_all": ["当前行程状态", "交通已"],
+      "response_keywords_any": ["已有关联交通订单", "票务结果：已有关联交通订单"],
+      "pending_domain": "",
+      "pending_empty": true
+    }
+  },
+  {
+    "id": "tc_042_travel_plan_existing_hotel_overlap",
+    "description": "travel_plan 应识别与行程区间重叠的酒店订单，而不只看入住首日。",
+    "turns": [
+      "从北京出发结合2026-03-21上海开始两天的天气、交通和酒店，帮我做一个出行方案"
+    ],
+    "expected": {
+      "intents": ["travel_plan"],
+      "routed_agents_any": ["WeatherQueryAssistant"],
+      "response_keywords_all": ["当前行程状态"],
+      "response_keywords_any": ["已有关联酒店订单", "离店"],
+      "pending_domain": "",
+      "pending_empty": true
+    }
+  },
+  {
+    "id": "tc_043_travel_plan_partial_hotel_coverage",
+    "description": "travel_plan 应能判断住宿部分覆盖，并提示还缺哪一段。",
+    "turns": [
+      "从北京出发结合2026-03-21上海开始两天的天气、交通和酒店，帮我做一个出行方案"
+    ],
+    "expected": {
+      "intents": ["travel_plan"],
+      "routed_agents_any": ["WeatherQueryAssistant"],
+      "response_keywords_all": ["当前行程状态"],
+      "response_keywords_any": ["还缺", "部分覆盖", "尚缺", "缺 1 晚"],
+      "pending_domain": "",
+      "pending_empty": true
+    }
+  }
+]

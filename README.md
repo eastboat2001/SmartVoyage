@@ -468,6 +468,26 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
 
 ## 7. 测试方式
 
+### 7.0 推荐测试顺序
+
+建议按下面顺序测试，避免把“服务没启动”误判成能力问题：
+
+1. 启动后端服务
+
+```powershell
+.\.venv\Scripts\python.exe run_all.py --dev-reload
+```
+
+2. 如果要做人机手工回归，另开一个终端启动 CLI
+
+```powershell
+.\.venv\Scripts\python.exe main.py
+```
+
+3. 手工回归时，优先参考根目录下的 `TEST_CASES.md`
+
+4. 如果要跑 LangSmith 评测，不需要再启动 `main.py`，但必须先保证第 1 步的后端服务已经启动
+
 ### 7.1 测试 MCP 订票链路
 
 ```powershell
@@ -677,6 +697,58 @@ Get-Content sql\insert_data.sql | mysql -u root -p123456
 ```powershell
 .\.venv\Scripts\python.exe run_all.py
 ```
+
+
+## 11. LangSmith 评测
+
+项目已提供一套不依赖 `pytest` 的 LangSmith 评测骨架：
+
+- 评测样例：`langsmith_eval/cases.json`
+- 运行脚本：`langsmith_eval/run_langsmith_eval.py`
+
+注意：`run_langsmith_eval.py` 会真实调用本地 orchestrator、A2A Agent 和 MCP 服务，因此在运行 LangSmith 评测前，必须先启动项目后端服务。LangSmith 评测不需要再启动 `main.py` 或 Streamlit 页面。
+
+开始前请先配置环境变量：
+
+- `LANGSMITH_API_KEY`
+- 可选：`LANGSMITH_ENDPOINT`
+- 可选：`LANGSMITH_PROJECT`
+
+推荐步骤：
+
+1. 启动项目后端服务
+2. 同步数据集到 LangSmith
+3. 运行离线 experiment
+
+示例命令：
+
+```powershell
+.\.venv\Scripts\python.exe langsmith_eval\run_langsmith_eval.py --sync-dataset --run
+```
+
+如果你只想更新数据集：
+
+```powershell
+.\.venv\Scripts\python.exe langsmith_eval\run_langsmith_eval.py --sync-dataset
+```
+
+如果你只想基于现有数据集跑实验：
+
+```powershell
+.\.venv\Scripts\python.exe langsmith_eval\run_langsmith_eval.py --run
+```
+
+当前内置 evaluator 包括：
+
+- `intent_match`
+- `route_match`
+- `response_keywords_match`
+- `pending_domain_match`
+
+后续建议继续增加：
+
+- `travel_plan_coverage_judge`
+- `existing_order_consistency_judge`
 
 
 ### 10.4 切换 provider 后不生效
