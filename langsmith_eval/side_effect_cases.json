@@ -1,0 +1,710 @@
+[
+  {
+    "id": "se_001_create_train_order",
+    "description": "交通订票：创建一笔新的高铁订单，并扣减余票。",
+    "side_effect": true,
+    "turns": [
+      "帮我预订2026-03-21北京到上海的高铁票，二等座1张"
+    ],
+    "preconditions": {
+      "dataset": "baseline",
+      "user": "demo_user",
+      "requires_existing_order": false,
+      "notes": [
+        "2026-03-21 北京到上海高铁存在可订库存",
+        "当前用户不存在同日期同车次同席别的重复订单"
+      ]
+    },
+    "setup_profile": "baseline",
+    "expected": {
+      "intents": [
+        "order"
+      ],
+      "routed_agents": [
+        "TicketOrderAssistant"
+      ],
+      "response_keywords_all": [
+        "订单号"
+      ],
+      "response_keywords_any": [
+        "预订成功",
+        "订票成功"
+      ],
+      "pending_domain": "",
+      "pending_empty": true
+    },
+    "expected_db_changes": {
+      "orders": [
+        "新增 1 条 order_type='train' 订单",
+        "新订单 status='booked'"
+      ],
+      "inventory": [
+        "对应 train_tickets.remaining_seats 减 1"
+      ]
+    },
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "create_train_booked_order",
+          "table": "orders",
+          "filter": {
+            "order_type": "train",
+            "status": "booked",
+            "departure_city": "北京",
+            "arrival_city": "上海",
+            "departure_time": "2026-03-21 07:00:00",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座",
+            "quantity": 1
+          },
+          "delta": 1
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "create_train_inventory_delta",
+          "table": "train_tickets",
+          "filter": {
+            "departure_time": "2026-03-21 07:00:00",
+            "train_number": "G5",
+            "seat_type": "二等座"
+          },
+          "field": "remaining_seats",
+          "delta": -1
+        }
+      ]
+    },
+    "reset_strategy": "full_rebuild"
+  },
+  {
+    "id": "se_002_cancel_train_order",
+    "description": "交通退票：取消已预订高铁订单，并回补余票。",
+    "side_effect": true,
+    "turns": [
+      "帮我退掉2026-03-21北京到上海的高铁票"
+    ],
+    "preconditions": {
+      "dataset": "baseline",
+      "user": "demo_user",
+      "requires_existing_order": true,
+      "notes": [
+        "运行前通过 setup_profile=seed_train_order 注入一笔 2026-03-21 北京到上海 的 booked 高铁订单"
+      ]
+    },
+    "setup_profile": "seed_train_order",
+    "expected": {
+      "intents": [
+        "cancel_order"
+      ],
+      "routed_agents": [
+        "TicketOrderAssistant"
+      ],
+      "response_keywords_all": [
+        "2026-03-21",
+        "北京",
+        "上海"
+      ],
+      "response_keywords_any": [
+        "退票成功",
+        "取消成功"
+      ],
+      "pending_domain": "",
+      "pending_empty": true
+    },
+    "expected_db_changes": {
+      "orders": [
+        "目标订单 status='cancelled'"
+      ],
+      "inventory": [
+        "对应 train_tickets.remaining_seats 加 1"
+      ]
+    },
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "cancel_train_booked_to_zero",
+          "table": "orders",
+          "filter": {
+            "order_type": "train",
+            "status": "booked",
+            "departure_city": "北京",
+            "arrival_city": "上海",
+            "departure_time": "2026-03-21 07:00:00",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座",
+            "quantity": 1
+          },
+          "delta": -1
+        },
+        {
+          "label": "cancel_train_cancelled_plus_one",
+          "table": "orders",
+          "filter": {
+            "order_type": "train",
+            "status": "cancelled",
+            "departure_city": "北京",
+            "arrival_city": "上海",
+            "departure_time": "2026-03-21 07:00:00",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座",
+            "quantity": 1
+          },
+          "delta": 1
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "cancel_train_inventory_delta",
+          "table": "train_tickets",
+          "filter": {
+            "departure_time": "2026-03-21 07:00:00",
+            "train_number": "G5",
+            "seat_type": "二等座"
+          },
+          "field": "remaining_seats",
+          "delta": 1
+        }
+      ]
+    },
+    "reset_strategy": "full_rebuild"
+  },
+  {
+    "id": "se_003_change_train_order",
+    "description": "交通改签：原订单变更为 changed，新订单变为 booked，并同步处理前后库存。",
+    "side_effect": true,
+    "turns": [
+      "把我2026-03-21北京到上海的高铁票改签到2026-03-22二等座"
+    ],
+    "preconditions": {
+      "dataset": "baseline",
+      "user": "demo_user",
+      "requires_existing_order": true,
+      "notes": [
+        "运行前通过 setup_profile=seed_train_order 注入一笔 2026-03-21 北京到上海 的 booked 高铁订单",
+        "2026-03-22 目标车次仍有可用库存"
+      ]
+    },
+    "setup_profile": "seed_train_order",
+    "expected": {
+      "intents": [
+        "change_order"
+      ],
+      "routed_agents": [
+        "TicketOrderAssistant"
+      ],
+      "response_keywords_all": [
+        "2026-03-22"
+      ],
+      "response_keywords_any": [
+        "改签成功",
+        "变更成功"
+      ],
+      "pending_domain": "",
+      "pending_empty": true
+    },
+    "expected_db_changes": {
+      "orders": [
+        "原订单 status='changed'",
+        "新增 1 条 train 订单，status='booked'"
+      ],
+      "inventory": [
+        "原车次库存回补",
+        "新车次库存扣减"
+      ]
+    },
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "change_train_old_booked_to_zero",
+          "table": "orders",
+          "filter": {
+            "order_type": "train",
+            "status": "booked",
+            "departure_city": "北京",
+            "arrival_city": "上海",
+            "departure_time": "2026-03-21 07:00:00",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座",
+            "quantity": 1
+          },
+          "delta": -1
+        },
+        {
+          "label": "change_train_old_changed_plus_one",
+          "table": "orders",
+          "filter": {
+            "order_type": "train",
+            "status": "changed",
+            "departure_city": "北京",
+            "arrival_city": "上海",
+            "departure_time": "2026-03-21 07:00:00",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座",
+            "quantity": 1
+          },
+          "delta": 1
+        },
+        {
+          "label": "change_train_new_booked_plus_one",
+          "table": "orders",
+          "filter": {
+            "order_type": "train",
+            "status": "booked",
+            "departure_city": "北京",
+            "arrival_city": "上海",
+            "departure_time": "2026-03-22 09:00:00",
+            "transport_no": "G13",
+            "ticket_or_room_type": "二等座",
+            "quantity": 1
+          },
+          "delta": 1
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "change_train_old_inventory_restore",
+          "table": "train_tickets",
+          "filter": {
+            "departure_time": "2026-03-21 07:00:00",
+            "train_number": "G5",
+            "seat_type": "二等座"
+          },
+          "field": "remaining_seats",
+          "delta": 1
+        },
+        {
+          "label": "change_train_new_inventory_deduct",
+          "table": "train_tickets",
+          "filter": {
+            "departure_time": "2026-03-22 09:00:00",
+            "train_number": "G13",
+            "seat_type": "二等座"
+          },
+          "field": "remaining_seats",
+          "delta": -1
+        }
+      ]
+    },
+    "reset_strategy": "full_rebuild"
+  },
+  {
+    "id": "se_004_create_hotel_order",
+    "description": "酒店预订：创建酒店订单，并扣减入住区间各晚库存。",
+    "side_effect": true,
+    "turns": [
+      "帮我订2026-03-21上海外滩云际酒店的高级大床房，住2晚1间"
+    ],
+    "preconditions": {
+      "dataset": "baseline",
+      "user": "demo_user",
+      "requires_existing_order": false,
+      "notes": [
+        "2026-03-21 与 2026-03-22 两晚的高级大床房均有剩余库存"
+      ]
+    },
+    "setup_profile": "baseline",
+    "expected": {
+      "intents": [
+        "hotel"
+      ],
+      "routed_agents": [
+        "HotelAssistant"
+      ],
+      "response_keywords_all": [
+        "订单号",
+        "2晚"
+      ],
+      "response_keywords_any": [
+        "酒店预订成功",
+        "预订成功"
+      ],
+      "pending_domain": "",
+      "pending_empty": true
+    },
+    "expected_db_changes": {
+      "orders": [
+        "新增 1 条 order_type='hotel' 订单",
+        "新订单 status='booked'"
+      ],
+      "inventory": [
+        "hotel_room_inventory.remaining_rooms 在涉及的每晚各减 1"
+      ]
+    },
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "create_hotel_booked_order",
+          "table": "orders",
+          "filter": {
+            "order_type": "hotel",
+            "status": "booked",
+            "departure_city": "上海",
+            "hotel_name": "上海外滩云际酒店",
+            "ticket_or_room_type": "高级大床房",
+            "departure_time": {
+              "op": "startswith",
+              "value": "2026-03-21"
+            },
+            "stay_nights": 2,
+            "quantity": 1
+          },
+          "delta": 1
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "create_hotel_inventory_2026_03_21",
+          "table": "hotel_room_inventory",
+          "filter": {
+            "hotel_id": 1,
+            "stay_date": "2026-03-21",
+            "room_type": "高级大床房"
+          },
+          "field": "remaining_rooms",
+          "delta": -1
+        },
+        {
+          "label": "create_hotel_inventory_2026_03_22",
+          "table": "hotel_room_inventory",
+          "filter": {
+            "hotel_id": 1,
+            "stay_date": "2026-03-22",
+            "room_type": "高级大床房"
+          },
+          "field": "remaining_rooms",
+          "delta": -1
+        }
+      ]
+    },
+    "reset_strategy": "full_rebuild"
+  },
+  {
+    "id": "se_005_cancel_hotel_order",
+    "description": "酒店取消：取消已预订酒店订单，并回补入住区间库存。",
+    "side_effect": true,
+    "turns": [
+      "取消我订的2026-03-21上海外滩云际酒店"
+    ],
+    "preconditions": {
+      "dataset": "baseline",
+      "user": "demo_user",
+      "requires_existing_order": true,
+      "notes": [
+        "运行前通过 setup_profile=seed_hotel_order 注入一笔 2026-03-21 入住的 booked 酒店订单"
+      ]
+    },
+    "setup_profile": "seed_hotel_order",
+    "expected": {
+      "intents": [
+        "hotel"
+      ],
+      "routed_agents": [
+        "HotelAssistant"
+      ],
+      "response_keywords_all": [
+        "酒店"
+      ],
+      "response_keywords_any": [
+        "取消成功",
+        "酒店取消成功"
+      ],
+      "pending_domain": "",
+      "pending_empty": true
+    },
+    "expected_db_changes": {
+      "orders": [
+        "目标订单 status='cancelled'"
+      ],
+      "inventory": [
+        "涉及每晚的 hotel_room_inventory.remaining_rooms 各加 1"
+      ]
+    },
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "cancel_hotel_booked_to_zero",
+          "table": "orders",
+          "filter": {
+            "order_type": "hotel",
+            "status": "booked",
+            "departure_city": "上海",
+            "hotel_name": "上海外滩云际酒店",
+            "ticket_or_room_type": "高级大床房",
+            "departure_time": {
+              "op": "startswith",
+              "value": "2026-03-21"
+            },
+            "stay_nights": 2,
+            "quantity": 1
+          },
+          "delta": -1
+        },
+        {
+          "label": "cancel_hotel_cancelled_plus_one",
+          "table": "orders",
+          "filter": {
+            "order_type": "hotel",
+            "status": "cancelled",
+            "departure_city": "上海",
+            "hotel_name": "上海外滩云际酒店",
+            "ticket_or_room_type": "高级大床房",
+            "departure_time": {
+              "op": "startswith",
+              "value": "2026-03-21"
+            },
+            "stay_nights": 2,
+            "quantity": 1
+          },
+          "delta": 1
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "cancel_hotel_inventory_2026_03_21",
+          "table": "hotel_room_inventory",
+          "filter": {
+            "hotel_id": 1,
+            "stay_date": "2026-03-21",
+            "room_type": "高级大床房"
+          },
+          "field": "remaining_rooms",
+          "delta": 1
+        },
+        {
+          "label": "cancel_hotel_inventory_2026_03_22",
+          "table": "hotel_room_inventory",
+          "filter": {
+            "hotel_id": 1,
+            "stay_date": "2026-03-22",
+            "room_type": "高级大床房"
+          },
+          "field": "remaining_rooms",
+          "delta": 1
+        }
+      ]
+    },
+    "reset_strategy": "full_rebuild"
+  },
+  {
+    "id": "se_006_change_hotel_order",
+    "description": "酒店改期：原订单变为 changed，新订单变为 booked，并同步处理前后库存。",
+    "side_effect": true,
+    "turns": [
+      "把我2026-03-21上海外滩云际酒店改到2026-03-22"
+    ],
+    "preconditions": {
+      "dataset": "baseline",
+      "user": "demo_user",
+      "requires_existing_order": true,
+      "notes": [
+        "运行前通过 setup_profile=seed_hotel_order 注入一笔 2026-03-21 入住、2晚的 booked 酒店订单",
+        "目标日期对应房型仍有库存"
+      ]
+    },
+    "setup_profile": "seed_hotel_order",
+    "expected": {
+      "intents": [
+        "hotel"
+      ],
+      "routed_agents": [
+        "HotelAssistant"
+      ],
+      "response_keywords_all": [
+        "2026-03-22"
+      ],
+      "response_keywords_any": [
+        "酒店改期成功",
+        "改期成功",
+        "变更成功"
+      ],
+      "pending_domain": "",
+      "pending_empty": true
+    },
+    "expected_db_changes": {
+      "orders": [
+        "原订单 status='changed'",
+        "新增 1 条 hotel 订单，status='booked'"
+      ],
+      "inventory": [
+        "原入住区间库存回补，新入住区间库存扣减；重叠夜晚按净变化计算"
+      ]
+    },
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "change_hotel_old_booked_to_zero",
+          "table": "orders",
+          "filter": {
+            "order_type": "hotel",
+            "status": "booked",
+            "departure_city": "上海",
+            "hotel_name": "上海外滩云际酒店",
+            "ticket_or_room_type": "高级大床房",
+            "departure_time": {
+              "op": "startswith",
+              "value": "2026-03-21"
+            },
+            "stay_nights": 2,
+            "quantity": 1
+          },
+          "delta": -1
+        },
+        {
+          "label": "change_hotel_old_changed_plus_one",
+          "table": "orders",
+          "filter": {
+            "order_type": "hotel",
+            "status": "changed",
+            "departure_city": "上海",
+            "hotel_name": "上海外滩云际酒店",
+            "ticket_or_room_type": "高级大床房",
+            "departure_time": {
+              "op": "startswith",
+              "value": "2026-03-21"
+            },
+            "stay_nights": 2,
+            "quantity": 1
+          },
+          "delta": 1
+        },
+        {
+          "label": "change_hotel_new_booked_plus_one",
+          "table": "orders",
+          "filter": {
+            "order_type": "hotel",
+            "status": "booked",
+            "departure_city": "上海",
+            "hotel_name": "上海外滩云际酒店",
+            "ticket_or_room_type": "高级大床房",
+            "departure_time": {
+              "op": "startswith",
+              "value": "2026-03-22"
+            },
+            "stay_nights": 2,
+            "quantity": 1
+          },
+          "delta": 1
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "change_hotel_inventory_2026_03_21",
+          "table": "hotel_room_inventory",
+          "filter": {
+            "hotel_id": 1,
+            "stay_date": "2026-03-21",
+            "room_type": "高级大床房"
+          },
+          "field": "remaining_rooms",
+          "delta": 1
+        },
+        {
+          "label": "change_hotel_inventory_2026_03_22_overlap_net_zero",
+          "table": "hotel_room_inventory",
+          "filter": {
+            "hotel_id": 1,
+            "stay_date": "2026-03-22",
+            "room_type": "高级大床房"
+          },
+          "field": "remaining_rooms",
+          "delta": 0
+        },
+        {
+          "label": "change_hotel_inventory_2026_03_23",
+          "table": "hotel_room_inventory",
+          "filter": {
+            "hotel_id": 1,
+            "stay_date": "2026-03-23",
+            "room_type": "高级大床房"
+          },
+          "field": "remaining_rooms",
+          "delta": -1
+        }
+      ]
+    },
+    "reset_strategy": "full_rebuild"
+  },
+  {
+    "id": "se_007_travel_plan_should_order",
+    "description": "travel_plan 明确要求有合适票就直接订时，应识别明确的条件式下单意图并进入订票执行链路。",
+    "side_effect": true,
+    "turns": [
+      "从北京出发，结合2026-03-21上海开始两天的天气、交通和酒店，帮我做方案；如果高铁合适就直接帮我订票"
+    ],
+    "preconditions": {
+      "dataset": "baseline",
+      "user": "demo_user",
+      "requires_existing_order": false,
+      "notes": [
+        "本次行程没有已预订交通订单",
+        "高铁链路存在可订库存"
+      ]
+    },
+    "setup_profile": "baseline",
+    "expected": {
+      "intents": [
+        "travel_plan"
+      ],
+      "routed_agents_any": [
+        "WeatherQueryAssistant",
+        "TicketQueryAssistant",
+        "TicketOrderAssistant"
+      ],
+      "response_keywords_all": [
+        "当前行程状态",
+        "票务结果"
+      ],
+      "response_keywords_any": [
+        "预订成功",
+        "订单号",
+        "已完成订票"
+      ],
+      "pending_domain": "",
+      "pending_empty": true
+    },
+    "expected_db_changes": {
+      "orders": [
+        "新增 1 条 train 订单"
+      ],
+      "inventory": [
+        "北京到上海、2026-03-21 当日高铁总余票合计减少 1"
+      ]
+    },
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "travel_plan_new_train_order",
+          "table": "orders",
+          "filter": {
+            "order_type": "train",
+            "status": "booked",
+            "departure_city": "北京",
+            "arrival_city": "上海",
+            "departure_time": {
+              "op": "startswith",
+              "value": "2026-03-21"
+            }
+          },
+          "delta": 1
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "travel_plan_same_day_train_inventory_sum",
+          "table": "train_tickets",
+          "filter": {
+            "departure_city": "北京",
+            "arrival_city": "上海",
+            "departure_time": {
+              "op": "startswith",
+              "value": "2026-03-21"
+            }
+          },
+          "field": "remaining_seats",
+          "delta": -1
+        }
+      ]
+    },
+    "reset_strategy": "full_rebuild"
+  }
+]

@@ -6,10 +6,19 @@
       "查询当前订单"
     ],
     "expected": {
-      "intents": ["my_orders"],
-      "routed_agents": ["TicketOrderAssistant"],
-      "response_keywords_all": ["已预订订单如下"],
-      "response_keywords_any": ["高铁票", "酒店"],
+      "intents": [
+        "my_orders"
+      ],
+      "routed_agents": [
+        "TicketOrderAssistant"
+      ],
+      "response_keywords_all": [
+        "已预订订单如下"
+      ],
+      "response_keywords_any": [
+        "高铁票",
+        "酒店"
+      ],
       "pending_domain": "",
       "pending_empty": true
     }
@@ -21,9 +30,17 @@
       "查询2026-03-21上海的酒店"
     ],
     "expected": {
-      "intents": ["hotel"],
-      "routed_agents": ["HotelAssistant"],
-      "response_keywords_all": ["排序偏好", "预算画像", "上海外滩云际酒店"],
+      "intents": [
+        "hotel"
+      ],
+      "routed_agents": [
+        "HotelAssistant"
+      ],
+      "response_keywords_all": [
+        "排序偏好",
+        "预算画像",
+        "上海外滩云际酒店"
+      ],
       "response_keywords_any": [],
       "pending_domain": "",
       "pending_empty": true
@@ -38,7 +55,10 @@
     "expected": {
       "intents": [],
       "routed_agents": [],
-      "response_keywords_all": ["出发吗", "交通和酒店联动方案"],
+      "response_keywords_all": [
+        "出发吗",
+        "交通和酒店联动方案"
+      ],
       "response_keywords_any": [],
       "pending_domain": "travel_plan",
       "pending_empty": false
@@ -52,11 +72,24 @@
       "从北京出发"
     ],
     "expected": {
-      "intents": ["travel_plan"],
-      "routed_agents_any": ["WeatherQueryAssistant", "TicketQueryAssistant"],
-      "response_keywords_all": ["当前行程状态", "天气判断", "出行建议"],
-      "response_keywords_any": ["票务结果", "酒店结果"],
-      "response_keywords_none": ["你这次是从北京出发吗"],
+      "intents": [
+        "travel_plan"
+      ],
+      "routed_agents_any": [
+        "WeatherQueryAssistant"
+      ],
+      "response_keywords_all": [
+        "当前行程状态",
+        "天气判断",
+        "出行建议"
+      ],
+      "response_keywords_any": [
+        "票务结果",
+        "酒店结果"
+      ],
+      "response_keywords_none": [
+        "你这次是从北京出发吗"
+      ],
       "pending_domain": "",
       "pending_empty": true
     }
@@ -68,10 +101,21 @@
       "从北京出发结合2026-03-21上海开始两天的天气、交通和酒店，帮我做一个出行方案"
     ],
     "expected": {
-      "intents": ["travel_plan"],
-      "routed_agents_any": ["WeatherQueryAssistant", "TicketQueryAssistant"],
-      "response_keywords_all": ["当前行程状态", "天气判断", "出行建议"],
-      "response_keywords_any": ["票务结果", "酒店结果"],
+      "intents": [
+        "travel_plan"
+      ],
+      "routed_agents_any": [
+        "WeatherQueryAssistant"
+      ],
+      "response_keywords_all": [
+        "当前行程状态",
+        "天气判断",
+        "出行建议"
+      ],
+      "response_keywords_any": [
+        "票务结果",
+        "酒店结果"
+      ],
       "pending_domain": "",
       "pending_empty": true
     }
@@ -83,10 +127,20 @@
       "从北京出发结合2026-03-21上海开始两天的天气、交通和酒店，帮我做一个出行方案"
     ],
     "expected": {
-      "intents": ["travel_plan"],
-      "routed_agents_any": ["WeatherQueryAssistant"],
-      "response_keywords_all": ["当前行程状态", "交通已"],
-      "response_keywords_any": ["已有关联交通订单", "票务结果：已有关联交通订单"],
+      "intents": [
+        "travel_plan"
+      ],
+      "routed_agents_any": [
+        "WeatherQueryAssistant"
+      ],
+      "response_keywords_all": [
+        "当前行程状态",
+        "交通已"
+      ],
+      "response_keywords_any": [
+        "已有关联交通订单",
+        "票务结果：已有关联交通订单"
+      ],
       "pending_domain": "",
       "pending_empty": true
     }
@@ -98,10 +152,19 @@
       "从北京出发结合2026-03-21上海开始两天的天气、交通和酒店，帮我做一个出行方案"
     ],
     "expected": {
-      "intents": ["travel_plan"],
-      "routed_agents_any": ["WeatherQueryAssistant"],
-      "response_keywords_all": ["当前行程状态"],
-      "response_keywords_any": ["已有关联酒店订单", "离店"],
+      "intents": [
+        "travel_plan"
+      ],
+      "routed_agents_any": [
+        "WeatherQueryAssistant"
+      ],
+      "response_keywords_all": [
+        "当前行程状态"
+      ],
+      "response_keywords_any": [
+        "已有关联酒店订单",
+        "离店"
+      ],
       "pending_domain": "",
       "pending_empty": true
     }
@@ -113,12 +176,173 @@
       "从北京出发结合2026-03-21上海开始两天的天气、交通和酒店，帮我做一个出行方案"
     ],
     "expected": {
-      "intents": ["travel_plan"],
-      "routed_agents_any": ["WeatherQueryAssistant"],
-      "response_keywords_all": ["当前行程状态"],
-      "response_keywords_any": ["还缺", "部分覆盖", "尚缺", "缺 1 晚"],
+      "intents": [
+        "travel_plan"
+      ],
+      "routed_agents_any": [
+        "WeatherQueryAssistant"
+      ],
+      "response_keywords_all": [
+        "当前行程状态"
+      ],
+      "response_keywords_any": [
+        "还缺",
+        "部分覆盖",
+        "尚缺",
+        "缺 1 晚",
+        "存在缺口",
+        "缺少首日",
+        "首日住宿"
+      ],
       "pending_domain": "",
       "pending_empty": true
+    }
+  },
+  {
+    "id": "tc_001_query_weather",
+    "description": "天气查询应进入天气域，不应误路由到订单或酒店域。",
+    "turns": [
+      "查询2026-03-21上海的天气"
+    ],
+    "expected": {
+      "intents": [
+        "weather"
+      ],
+      "routed_agents": [
+        "WeatherQueryAssistant"
+      ],
+      "response_keywords_all": [
+        "上海"
+      ],
+      "response_keywords_any": [
+        "多云",
+        "天气",
+        "2026-03-21",
+        "2026年3月21日"
+      ],
+      "pending_domain": "",
+      "pending_empty": true
+    }
+  },
+  {
+    "id": "tc_002_query_train_ticket",
+    "description": "高铁查询应进入票务查询域。",
+    "turns": [
+      "查询2026-03-21北京到上海的高铁票"
+    ],
+    "expected": {
+      "intents": [
+        "train"
+      ],
+      "routed_agents": [
+        "TicketQueryAssistant"
+      ],
+      "response_keywords_all": [
+        "北京",
+        "上海"
+      ],
+      "response_keywords_any": [
+        "高铁",
+        "G5",
+        "余票"
+      ],
+      "pending_domain": "",
+      "pending_empty": true
+    }
+  },
+  {
+    "id": "tc_012_query_mixed_order_types",
+    "description": "多类型订单查询应统一走订单域，不拆成酒店库存查询。",
+    "turns": [
+      "查询我的飞机票和酒店和火车票"
+    ],
+    "expected": {
+      "intents": [
+        "my_orders"
+      ],
+      "routed_agents": [
+        "TicketOrderAssistant"
+      ],
+      "response_keywords_all": [
+        "已预订订单如下"
+      ],
+      "response_keywords_any": [
+        "高铁票",
+        "酒店"
+      ],
+      "pending_domain": "",
+      "pending_empty": true
+    }
+  },
+  {
+    "id": "tc_024_query_hotel_orders",
+    "description": "查询酒店订单应统一从订单域返回，而不是误走酒店库存。",
+    "turns": [
+      "查询我的酒店订单"
+    ],
+    "expected": {
+      "intents": [
+        "my_orders"
+      ],
+      "routed_agents": [
+        "TicketOrderAssistant"
+      ],
+      "response_keywords_all": [
+        "酒店"
+      ],
+      "response_keywords_any": [
+        "已预订订单如下",
+        "已预订酒店订单如下"
+      ],
+      "pending_domain": "",
+      "pending_empty": true
+    }
+  },
+  {
+    "id": "tc_030_ticket_missing_departure",
+    "description": "交通查询缺出发地时，当前会先走编排层 home_city 预追问，不应直接脑补继续查票。",
+    "turns": [
+      "帮我查去上海的高铁票"
+    ],
+    "expected": {
+      "intents": [],
+      "routed_agents": [],
+      "response_keywords_all": [
+        "出发"
+      ],
+      "response_keywords_any": [
+        "从北京出发吗",
+        "如果按你的常住地北京出发",
+        "请直接告诉我出发城市"
+      ],
+      "pending_domain": "",
+      "pending_empty": true
+    }
+  },
+  {
+    "id": "tc_031_hotel_cancel_missing_info",
+    "description": "酒店取消缺选择条件时应进入 hotel 域补参。",
+    "turns": [
+      "取消我的酒店"
+    ],
+    "expected": {
+      "intents": [
+        "hotel"
+      ],
+      "routed_agents": [
+        "HotelAssistant"
+      ],
+      "response_keywords_all": [
+        "请"
+      ],
+      "response_keywords_any": [
+        "酒店名",
+        "入住日期",
+        "哪一笔",
+        "哪个酒店"
+      ],
+      "pending_domain": "hotel",
+      "pending_empty": false
     }
   }
 ]

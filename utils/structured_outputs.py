@@ -33,6 +33,9 @@ class IntentRecognitionResult(BaseModel):
     follow_up_message: str = ""
 
 
+TravelPlanOrderIntent = Literal["", "none", "any", "train_if_suitable", "flight_if_suitable"]
+
+
 class TravelPlanResult(BaseModel):
     transport_mode: Literal["train", "flight"]
     weather_brief: str = ""
@@ -41,7 +44,6 @@ class TravelPlanResult(BaseModel):
     ticket_query: str = ""
     hotel_query: str = ""
     hotel_reason: str = ""
-    should_order: bool = False
 
     @model_validator(mode="after")
     def validate_payload(self):
@@ -68,17 +70,18 @@ class TravelPlanWorkflowExtractionResult(BaseModel):
     departure_city: str = ""
     arrival_city: str = ""
     travel_date: str = ""
-    stay_days: int = 1
-    include_hotel: bool = False
-    should_order: bool = False
+    travel_date_text: str = ""
+    stay_days: int = 0
+    include_hotel: bool | None = None
+    order_intent: TravelPlanOrderIntent = ""
     missing_slots: list[str] = Field(default_factory=list)
     follow_up_message: str = ""
     is_complete: bool = False
 
     @model_validator(mode="after")
     def validate_payload(self):
-        if self.stay_days <= 0:
-            self.stay_days = 1
+        if self.stay_days < 0:
+            self.stay_days = 0
         if self.is_complete and self.missing_slots:
             raise ValueError("complete extraction should not contain missing_slots")
         if not self.is_complete and not self.follow_up_message.strip():

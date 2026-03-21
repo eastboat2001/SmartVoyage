@@ -54,6 +54,7 @@ class TravelPlanState(TypedDict):
 class TravelPlanWorkflowState(TypedDict, total=False):
     conversation_history: str
     latest_query: str
+    raw_prompt: str
     intents: list[str]
     pending_context: dict[str, Any]
     user_profile_summary: str
@@ -79,6 +80,7 @@ class TravelPlanWorkflowState(TypedDict, total=False):
     existing_hotel_summary: str
     ticket_result_state: str
     ticket_final_text: str
+    ticket_result_raw_text: str
     hotel_result_state: str
     hotel_final_text: str
     order_result_state: str
@@ -320,7 +322,10 @@ class SmartVoyageOrchestrator:
                 "pending_context": {},
             }
 
-        if follow_up_message:
+        if follow_up_message and not any(
+            intent in {"hotel", "order", "my_orders", "cancel_order", "change_order", "travel_plan"}
+            for intent in intents
+        ):
             return {
                 "response": follow_up_message,
                 "intents": intents,
@@ -393,6 +398,7 @@ class SmartVoyageOrchestrator:
             {
                 "conversation_history": conversation_history,
                 "latest_query": user_queries.get("travel_plan", prompt),
+                "raw_prompt": prompt,
                 "intents": intents,
                 "pending_context": pending_context or {},
                 "user_profile_summary": user_profile.summary_text(),
@@ -412,6 +418,7 @@ class SmartVoyageOrchestrator:
         pending_context = state.get("pending_context", {})
         travel_state = self._extract_travel_plan_state(
             query=travel_query,
+            raw_prompt=state.get("raw_prompt", ""),
             conversation_history=state["conversation_history"],
             pending_context=pending_context,
         )
@@ -476,6 +483,14 @@ class SmartVoyageOrchestrator:
             },
             description="跨 Agent 出行规划",
         )
+        order_intent = str(state.get("slots", {}).get("order_intent", "none") or "none")
+        should_order = False
+        if order_intent == "any":
+            should_order = True
+        elif order_intent == "train_if_suitable":
+            should_order = plan.transport_mode == "train"
+        elif order_intent == "flight_if_suitable":
+            should_order = plan.transport_mode == "flight"
         return {
             "weather_brief": plan.weather_brief,
             "trip_status_summary": plan.trip_status_summary,
@@ -484,7 +499,7 @@ class SmartVoyageOrchestrator:
             "ticket_query": plan.ticket_query,
             "hotel_query": plan.hotel_query,
             "hotel_reason": plan.hotel_reason,
-            "should_order": plan.should_order,
+            "should_order": should_order,
         }
 
     def _travel_plan_ticket_node(self, state: TravelPlanWorkflowState) -> dict[str, Any]:
@@ -530,10 +545,16 @@ class SmartVoyageOrchestrator:
                 "order_result_state": "skipped",
                 "order_final_text": "由于前一步没有查到可用票务数据，本次没有继续提交订票请求。",
             }
+        ticket_result_text = str(state.get("ticket_result_raw_text", "") or "").strip()
+        if not ticket_result_text:
+            return {
+                "order_result_state": "skipped",
+                "order_final_text": "票务查询结果为空，本次没有继续提交订票请求。",
+            }
         order_query = self._build_order_query(
             travel_query=state["normalized_travel_query"],
             transport_mode=state["transport_mode"],
-            ticket_result_text=state.get("ticket_result_raw_text", ""),
+            ticket_result_text=ticket_result_text,
         )
         order_query = self._with_user_context("order", order_query)
         order_result = self._call_agent(
@@ -685,6 +706,7 @@ class SmartVoyageOrchestrator:
         self,
         *,
         query: str,
+        raw_prompt: str,
         conversation_history: str,
         pending_context: dict,
     ) -> TravelPlanState:
@@ -695,34 +717,45 @@ class SmartVoyageOrchestrator:
             {
                 "conversation_history": "\n".join(conversation_history.split("\n")[-6:]),
                 "query": query,
+                "raw_prompt": raw_prompt or query,
                 "current_date": datetime.now(pytz.timezone("Asia/Shanghai")).strftime("%Y-%m-%d"),
                 "pending_context": json.dumps(pending_context, ensure_ascii=False) if pending_context else "无",
             },
             description="travel_plan 状态抽取",
         )
         slots: dict[str, str | int | bool] = dict(pending_slots) if isinstance(pending_slots, dict) else {}
-        explicit_slots = {
+
+        string_fields = {
             "departure_city": extraction.departure_city,
             "arrival_city": extraction.arrival_city,
             "travel_date": extraction.travel_date,
-            "stay_days": extraction.stay_days,
-            "include_hotel": extraction.include_hotel,
-            "should_order": extraction.should_order,
+            "travel_date_text": extraction.travel_date_text,
         }
-        for key, value in explicit_slots.items():
-            if isinstance(value, str):
-                if value.strip():
-                    slots[key] = value.strip()
-            else:
-                slots[key] = value
-        if int(slots.get("stay_days", 1)) <= 0:
+        for key, value in string_fields.items():
+            normalized = str(value or "").strip()
+            if normalized:
+                slots[key] = normalized
+
+        if extraction.stay_days > 0:
+            slots["stay_days"] = extraction.stay_days
+        if extraction.include_hotel is not None:
+            slots["include_hotel"] = extraction.include_hotel
+        if str(extraction.order_intent or "").strip():
+            slots["order_intent"] = str(extraction.order_intent).strip()
+
+        if int(slots.get("stay_days", 0) or 0) <= 0:
             slots["stay_days"] = 1
+        if "include_hotel" not in slots:
+            slots["include_hotel"] = False
+        if not str(slots.get("order_intent", "")).strip():
+            slots["order_intent"] = "none"
+
         missing_slots = self._compute_travel_plan_missing_slots(slots)
         return {
             "action": "plan_trip",
             "slots": slots,
             "missing_slots": missing_slots,
-            "original_query": query,
+            "original_query": raw_prompt.strip() or query,
         }
 
     @staticmethod
@@ -1130,7 +1163,15 @@ class SmartVoyageOrchestrator:
         ticket_result_text: str,
     ) -> str:
         transport_label = "高铁票" if transport_mode == "train" else "机票"
-        first_ticket_line = ticket_result_text.splitlines()[0].strip()
+        first_ticket_line = next(
+            (line.strip() for line in ticket_result_text.splitlines() if line.strip()),
+            "",
+        )
+        if not first_ticket_line:
+            return (
+                f"{travel_query}\n"
+                f"请继续协助预订{transport_label}。如果当前缺少可用票务明细，请先追问，不要虚构车次或航班信息。"
+            )
         return (
             f"{travel_query}\n"
             f"请基于以下已查询到的真实票务结果，选择最合适的一张{transport_label}完成预订；"

@@ -123,7 +123,7 @@ class SmartVoyagePrompts:
 - 当交通尚未覆盖或还需补足交通方案时，ticket_query 必须是一个可以直接发送给票务查询 Agent 的完整中文查询；如果交通已经齐备且不需要再补票，ticket_query 可以为空字符串。
 - 如果用户请求本身明显涉及“旅游方案 / 玩几天 / 住宿 / 酒店 / 行程规划”，并且当前住宿尚未覆盖或还需补足住宿缺口，且已经明确了目的地和入住日期，请生成 hotel_query，作为可以直接发送给酒店 Agent 的完整中文查询；否则 hotel_query 置空字符串。
 - 如果生成了 hotel_query，hotel_reason 必须简要说明为什么当前住宿条件合适；如果 hotel_query 为空，hotel_reason 也置空字符串。
-- 如果用户已经明确要求订票，则 should_order=true；如果只是查票或比价，则 should_order=false。
+- 当前节点只负责做方案决策，不负责决定用户是否授权下单；是否进入订票执行链路由上游已抽取的用户下单意图和你输出的 transport_mode 共同决定。
 - 如果当前已预订订单已经覆盖了交通或住宿，就要在 `trip_status_summary` 里明确指出；例如用户要玩两天，但酒店订单只有 1 晚，也必须明确提醒“住宿还缺 1 晚”。
 - 如果交通或住宿已齐备，不要再把它说成“尚未安排”；如果只缺一部分，可以继续生成对应的 `ticket_query` 或 `hotel_query` 用于补足缺口。
 - 不要虚构具体车次、航班号、站点、舱位余票、出发时段等数据库中未明确给出的细节。票务查询阶段应优先生成较宽松、可命中的查询条件。
@@ -153,19 +153,27 @@ class SmartVoyagePrompts:
 - 字段含义：
   - `departure_city`：用户明确说出的出发城市。
   - `arrival_city`：用户明确说出的目的地城市。
-  - `travel_date`：用户明确说出的出发/入住起始日期，统一 YYYY-MM-DD；未明确则留空。
-  - `stay_days`：用户明确说“玩两天/住两晚/两天行程”时填写；未明确则默认 1。
-  - `include_hotel`：当用户明确提到酒店/住宿/住哪里/行程方案包含住宿时为 true，否则 false。
-  - `should_order`：只有用户明确要求“有合适票就直接订/直接帮我订票”时才为 true，否则 false。
+  - `travel_date`：如果用户明确给出了可归一化日期，请统一输出 YYYY-MM-DD；支持 `2026-03-21`、`2026年3月21日`、`26年3月21日`、`明天` 这类表达。无法可靠归一时留空。
+  - `travel_date_text`：用户原始日期表达；只要用户明确提到了日期或相对日期，就尽量保留原文。
+  - `stay_days`：用户明确说“玩两天/住两晚/两天行程”时填写；如果当前轮没有明确提到，则输出 0，表示本轮未提供新信息。
+  - `include_hotel`：当用户明确提到酒店/住宿/住哪里/行程方案包含住宿时输出 true；当用户明确表示不需要住宿时输出 false；如果当前轮没有提供新信息，则输出 null。
+  - `order_intent`：
+    - `any` 表示“有合适票就直接订/直接帮我订票”；
+    - `train_if_suitable` 表示“如果高铁合适就直接订”；
+    - `flight_if_suitable` 表示“如果飞机合适就直接订”；
+    - `none` 表示用户明确只查方案不下单；
+    - `""` 表示当前轮没有提供新的下单意图信息。
 - 最小进入后端条件：`departure_city + arrival_city + travel_date`。否则应 `is_complete=false`，并给出缺失字段追问。
 - 如果用户补充的是“从北京出发”这类信息，要把它只写入 `departure_city`，不要篡改其他字段。
-- 如果用户只说“去上海玩两天”，那么 arrival_city=上海，stay_days=2，其余未明确字段保持为空。
+- 如果用户只说“去上海玩两天”，那么 arrival_city=上海，stay_days=2，其余未明确字段保持为空或未设置。
+- 在待补轮次里，当前轮没有提到的字段不要随意覆盖旧值；保持空字符串、0、null 或 `""`。
 - 当 `is_complete=false` 时，必须给出简洁中文 follow_up_message，并列出 missing_slots。
 - 不要输出 markdown，不要补充结构化字段以外的解释。
 
 可用上下文：
 - 最近对话：{conversation_history}
-- 当前用户输入：{query}
+- travel_plan 改写后查询：{query}
+- 原始用户输入：{raw_prompt}
 - 当前日期：{current_date} (Asia/Shanghai)
 - 待补上下文摘要：{pending_context}
 """
