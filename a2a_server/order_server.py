@@ -6,15 +6,12 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
 from typing import Any
 
 import httpx
-import pytz
 import uvicorn
 from fastapi import FastAPI
 from langgraph.graph import END, START, StateGraph
-from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command, interrupt
 from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp import ClientSession
@@ -28,6 +25,8 @@ from create_logger import logger
 from main_prompts import SmartVoyagePrompts
 from utils.fastapi_middleware import install_common_middleware
 from utils.model_factory import build_order_agent, extract_text_from_agent_result
+from utils.order_action_context import extract_order_action, strip_order_action
+from utils.persistent_checkpointer import PersistentInMemorySaver
 from utils.request_context import clear_request_id, ensure_request_id, set_request_id
 from utils.resilient_llm import ResilientModelInvoker
 from utils.service_protocol import (
@@ -36,7 +35,8 @@ from utils.service_protocol import (
     AgentMetadataResponse,
     AgentSkillDescriptor,
 )
-from utils.structured_outputs import OrderOperationExtractionResult
+from utils.structured_outputs import DateResolutionResult, OrderActionDecisionResult, OrderOperationExtractionResult, ReviewDecisionResult
+from utils.time_utils import get_current_date_str
 from utils.travel_read_context import with_travel_read_kind
 
 
@@ -63,6 +63,7 @@ SERVICE_SKILLS = [
 
 class OrderWorkflowState(TypedDict, total=False):
     conversation: str
+    now_override: str
     latest_query: str
     clean_query: str
     username: str
@@ -82,15 +83,32 @@ class OrderWorkflowState(TypedDict, total=False):
 
 
 def extract_username(conversation: str) -> str:
-    matches = re.findall(r"当前用户[:：]\s*([^\s，。,\.]+)", conversation)
-    if matches:
-        return matches[-1].strip()
+    lines = [line.strip() for line in conversation.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if not line.startswith("当前用户"):
+            continue
+        _, _, value = line.partition("：")
+        if not value:
+            _, _, value = line.partition(":")
+        username = value.strip().split()[0] if value.strip() else ""
+        if username:
+            return username
     return conf.default_username
 
 
 def extract_departure_date(conversation: str) -> str:
-    match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", conversation)
-    return match.group(1) if match else ""
+    query = latest_user_request(conversation)
+    result = model_invoker.invoke_structured(
+        SmartVoyagePrompts.date_resolution_prompt(),
+        DateResolutionResult,
+        {
+            "current_date": get_current_date_str(conf),
+            "query": query,
+        },
+        description="订单查询日期归一化",
+    )
+    logger.info(f"订单查询日期归一化结果: {result.model_dump()}")
+    return result.normalized_date.strip()
 
 
 def latest_user_request(conversation: str) -> str:
@@ -100,22 +118,6 @@ def latest_user_request(conversation: str) -> str:
     if conversation.strip().startswith("User:"):
         return conversation.split("User:", 1)[-1].strip()
     return conversation.strip()
-
-
-def is_order_query(conversation: str) -> bool:
-    keywords = ("我的订单", "查询订单", "查询我的订单", "查看订单", "看看我订", "我订了哪些", "已订", "已预订")
-    latest_query = latest_user_request(conversation)
-    return any(keyword in latest_query for keyword in keywords)
-
-
-def is_cancel_query(conversation: str) -> bool:
-    latest_query = latest_user_request(conversation)
-    return any(keyword in latest_query for keyword in ("退票", "退掉", "取消订单", "取消这张票", "取消机票", "取消高铁票"))
-
-
-def is_change_query(conversation: str) -> bool:
-    latest_query = latest_user_request(conversation)
-    return any(keyword in latest_query for keyword in ("改签", "改票", "改签到", "改成"))
 
 
 PENDING_CONTEXT_PATTERN = re.compile(r"\[PENDING_ORDER_CONTEXT\](?P<payload>.*?)\[/PENDING_ORDER_CONTEXT\]", re.DOTALL)
@@ -141,30 +143,54 @@ def summarize_conversation(conversation: str, limit: int = 8) -> str:
     return "\n".join(lines[-limit:])
 
 
-def determine_action(query: str, pending_context: dict[str, Any]) -> Literal["query_orders", "cancel_order", "change_order", "create_order"]:
+def classify_order_action(
+    conversation: str,
+    query: str,
+    pending_context: dict[str, Any],
+) -> Literal["query_orders", "cancel_order", "change_order", "create_order"]:
     pending_action = pending_context.get("action", "")
     if pending_action in {"cancel_order", "change_order"}:
         return pending_action
-    if is_order_query(query):
-        return "query_orders"
-    if is_cancel_query(query):
-        return "cancel_order"
-    if is_change_query(query):
-        return "change_order"
-    return "create_order"
+
+    explicit_action = extract_order_action(query)
+    if explicit_action:
+        return explicit_action
+
+    result = model_invoker.invoke_structured(
+        SmartVoyagePrompts.order_action_prompt(),
+        OrderActionDecisionResult,
+        {
+            "pending_context": pending_context_summary(pending_context),
+            "conversation_history": summarize_conversation(conversation),
+            "query": query,
+        },
+        description="订单动作分类",
+    )
+    logger.info(f"订单动作分类结果: {result.model_dump()}")
+    return result.action
 
 
 def is_hitl_review_pending(pending_context: dict[str, Any]) -> bool:
     return pending_context.get("action") == "hitl_review" and bool(pending_context.get("thread_id"))
 
 
-def parse_review_decision(query: str) -> Literal["approved", "rejected"] | None:
-    normalized = strip_pending_context(query).strip().lower()
-    if normalized in {"yes", "y", "确认", "同意", "通过", "继续", "approve"}:
-        return "approved"
-    if normalized in {"no", "n", "取消", "拒绝", "终止", "reject"}:
-        return "rejected"
-    return None
+def parse_review_decision(query: str, review_payload: dict[str, Any]) -> tuple[Literal["approved", "rejected"] | None, str]:
+    normalized_query = strip_order_action(strip_pending_context(query)).strip()
+    result = model_invoker.invoke_structured(
+        SmartVoyagePrompts.review_decision_prompt(),
+        ReviewDecisionResult,
+        {
+            "review_summary": review_payload.get("summary", "待审批操作"),
+            "query": normalized_query,
+        },
+        description="审批回复解析",
+    )
+    logger.info(f"审批回复解析结果: {result.model_dump()}")
+    if result.decision == "approved":
+        return "approved", ""
+    if result.decision == "rejected":
+        return "rejected", ""
+    return None, (result.follow_up_message.strip() or "这是一个待审批操作。请明确回复确认执行或取消执行。")
 
 
 def normalize_missing_fields(action: str, result: OrderOperationExtractionResult) -> list[str]:
@@ -270,11 +296,11 @@ async def invoke_order_tool(tool_name: str, params: dict[str, Any]) -> str:
         return f"调用订单工具失败：{exc}"
 
 
-async def invoke_travel_decision_agent(conversation: str, request_id: str) -> AgentInvokeResponse:
+async def invoke_travel_decision_agent(conversation: str, request_id: str, now_override: str = "") -> AgentInvokeResponse:
     async with httpx.AsyncClient(timeout=conf.agent_timeout_seconds) as client:
         response = await client.post(
             "http://localhost:5005/invoke",
-            json=AgentInvokeRequest(text=conversation, request_id=request_id).model_dump(),
+            json=AgentInvokeRequest(text=conversation, request_id=request_id, now_override=now_override).model_dump(),
             headers={"x-request-id": request_id},
         )
         response.raise_for_status()
@@ -283,6 +309,7 @@ async def invoke_travel_decision_agent(conversation: str, request_id: str) -> Ag
 
 class TransportOrderService:
     def __init__(self):
+        self.checkpointer = PersistentInMemorySaver(conf.order_checkpoint_path)
         self.workflow = self._build_workflow()
 
     def _build_workflow(self):
@@ -326,7 +353,7 @@ class TransportOrderService:
             },
         )
         workflow.add_edge("create_order", END)
-        return workflow.compile(checkpointer=InMemorySaver())
+        return workflow.compile(checkpointer=self.checkpointer)
 
     def _extract_operation_payload(
         self,
@@ -336,7 +363,7 @@ class TransportOrderService:
         query: str,
         pending_context: dict[str, Any],
     ) -> tuple[dict[str, str], list[str], str, dict[str, Any] | None]:
-        current_date = datetime.now(pytz.timezone("Asia/Shanghai")).strftime("%Y-%m-%d")
+        current_date = get_current_date_str(conf)
         extraction = model_invoker.invoke_structured(
             SmartVoyagePrompts.order_operation_extraction_prompt(),
             OrderOperationExtractionResult,
@@ -349,6 +376,13 @@ class TransportOrderService:
             },
             description=f"订单操作参数抽取:{action}",
         )
+        extraction_data = extraction.model_dump()
+        pending_fields = pending_context.get("extracted_fields", {}) if isinstance(pending_context, dict) else {}
+        if isinstance(pending_fields, dict):
+            for key, value in pending_fields.items():
+                if key in extraction_data and not extraction_data.get(key) and value:
+                    extraction_data[key] = value
+        extraction = OrderOperationExtractionResult(**extraction_data)
         logger.info(f"订单参数抽取结果: {extraction.model_dump()}")
         missing_fields = normalize_missing_fields(action, extraction)
         follow_up_message = extraction.follow_up_message.strip() or default_follow_up_message(action, missing_fields)
@@ -387,9 +421,9 @@ class TransportOrderService:
         conversation = state["conversation"]
         latest_query = latest_user_request(conversation)
         pending_context = extract_pending_context(latest_query)
-        clean_query = strip_pending_context(latest_query)
+        clean_query = strip_order_action(strip_pending_context(latest_query))
         username = extract_username(conversation)
-        action = determine_action(clean_query, pending_context)
+        action = classify_order_action(conversation, clean_query, pending_context)
         next_state: dict[str, Any] = {
             "latest_query": latest_query,
             "clean_query": clean_query,
@@ -437,7 +471,11 @@ class TransportOrderService:
     async def _lookup_tickets_node(self, state: OrderWorkflowState) -> dict[str, Any]:
         conversation = with_travel_read_kind(state["conversation"], "ticket")
         request_id = ensure_request_id()
-        ticket_result = await invoke_travel_decision_agent(conversation, request_id)
+        ticket_result = await invoke_travel_decision_agent(
+            conversation,
+            request_id,
+            state.get("now_override", ""),
+        )
         if ticket_result.state != "completed":
             logger.info(f"余票未查到：{ticket_result.text}")
             final_state: Literal["completed", "failed", "input_required"] = (
@@ -571,13 +609,13 @@ class TransportOrderService:
         pending_context = extract_pending_context(latest_query)
 
         if is_hitl_review_pending(pending_context):
-            decision = parse_review_decision(latest_query)
             thread_id = pending_context["thread_id"]
+            review_payload = pending_context.get("review_payload", {})
+            decision, follow_up_message = parse_review_decision(latest_query, review_payload)
             if not decision:
-                review_payload = pending_context.get("review_payload", {})
                 return AgentInvokeResponse(
                     state="input_required",
-                    text="这是一个待审批操作。请回复 yes 确认执行，或回复 no 取消执行。",
+                    text=follow_up_message,
                     pending_order_context=pending_context,
                     data={"kind": "hitl_review", "review_payload": review_payload},
                     meta={"thread_id": thread_id, "review_required": True},
@@ -589,7 +627,7 @@ class TransportOrderService:
         else:
             thread_id = request_id
             result = await self.workflow.ainvoke(
-                {"conversation": request.text},
+                {"conversation": request.text, "now_override": request.now_override},
                 config={"configurable": {"thread_id": thread_id}},
             )
 
@@ -605,6 +643,7 @@ class TransportOrderService:
                     "action": "hitl_review",
                     "thread_id": thread_id,
                     "review_payload": interrupt_payload,
+                    "resume_intent": interrupt_payload.get("action", "order"),
                 },
                 data={"kind": "hitl_review", "review_payload": interrupt_payload},
                 meta={"thread_id": thread_id, "review_required": True},

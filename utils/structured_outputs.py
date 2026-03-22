@@ -23,6 +23,34 @@ class IntentRecognitionResult(BaseModel):
     follow_up_message: str = ""
 
 
+class TravelReadKindResult(BaseModel):
+    kind: Literal["weather", "ticket", "time"]
+
+
+class TravelQueryContextResult(BaseModel):
+    is_ticket_or_travel_query: bool = False
+    has_explicit_departure_city: bool = False
+    has_explicit_transport_no: bool = False
+    needs_home_city_follow_up: bool = False
+
+
+class OrderActionDecisionResult(BaseModel):
+    action: Literal["query_orders", "cancel_order", "change_order", "create_order"]
+
+
+class ReviewDecisionResult(BaseModel):
+    decision: Literal["approved", "rejected", "unclear"]
+    follow_up_message: str = ""
+
+
+class DateResolutionResult(BaseModel):
+    normalized_date: str = ""
+
+
+class AutoOrderIntentResult(BaseModel):
+    should_order: bool = False
+
+
 class TransportDecisionPlanResult(BaseModel):
     transport_mode: Literal["train", "flight"]
     weather_brief: str = ""
@@ -77,33 +105,50 @@ class OrderOperationExtractionResult(BaseModel):
         return self
 
 
-class WeatherSqlResult(BaseModel):
-    status: Literal["sql", "input_required"]
-    sql: str = ""
+class WeatherQueryPlanResult(BaseModel):
+    status: Literal["ready", "input_required"]
+    city: str = ""
+    date_from: str = ""
+    date_to: str = ""
     message: str = ""
 
     @model_validator(mode="after")
     def validate_payload(self):
-        if self.status == "sql" and not self.sql.strip():
-            raise ValueError("sql status requires a non-empty sql field")
+        if self.status == "ready":
+            if not self.city.strip():
+                raise ValueError("ready status requires city")
+            if not self.date_from.strip():
+                raise ValueError("ready status requires date_from")
+            if not self.date_to.strip():
+                self.date_to = self.date_from
         if self.status == "input_required" and not self.message.strip():
             raise ValueError("input_required status requires a non-empty message field")
         return self
 
 
-class TicketSqlResult(BaseModel):
-    status: Literal["sql", "input_required"]
+class TicketQueryPlanResult(BaseModel):
+    status: Literal["ready", "input_required"]
     type: Literal["train", "flight"] | None = None
-    sql: str = ""
+    departure_city: str = ""
+    arrival_city: str = ""
+    date_from: str = ""
+    date_to: str = ""
+    transport_no: str = ""
+    ticket_type: str = ""
+    limit: int = 10
     message: str = ""
 
     @model_validator(mode="after")
     def validate_payload(self):
-        if self.status == "sql":
+        if self.status == "ready":
             if self.type is None:
-                raise ValueError("sql status requires a ticket type")
-            if not self.sql.strip():
-                raise ValueError("sql status requires a non-empty sql field")
+                raise ValueError("ready status requires a ticket type")
+            if not self.transport_no.strip():
+                if not (self.departure_city.strip() and self.arrival_city.strip() and self.date_from.strip()):
+                    raise ValueError("ready status requires route + date_from or transport_no")
+            if self.date_from.strip() and not self.date_to.strip():
+                self.date_to = self.date_from
+            self.limit = min(max(self.limit, 1), 20)
         if self.status == "input_required" and not self.message.strip():
             raise ValueError("input_required status requires a non-empty message field")
         return self

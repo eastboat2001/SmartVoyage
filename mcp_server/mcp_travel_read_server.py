@@ -7,7 +7,6 @@ import sys
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
-import pytz
 from mcp.server.fastmcp import FastMCP
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -16,6 +15,7 @@ from config import Config
 from create_logger import logger
 from utils.db import get_db_connection
 from utils.format import DateEncoder, default_encoder
+from utils.time_utils import get_current_time_payload
 
 
 conf = Config()
@@ -49,17 +49,10 @@ class TravelReadService:
                 conn.close()
 
     @staticmethod
-    def current_time(timezone_name: str = "Asia/Shanghai") -> str:
-        tz = pytz.timezone(timezone_name)
-        now = datetime.now(tz)
+    def current_time(timezone_name: str = "Asia/Shanghai", now_override: str = "") -> str:
         payload = {
             "status": "success",
-            "data": {
-                "timezone": timezone_name,
-                "current_time": now.strftime("%Y-%m-%d %H:%M:%S"),
-                "current_date": now.strftime("%Y-%m-%d"),
-                "weekday": now.strftime("%A"),
-            },
+            "data": get_current_time_payload(conf, timezone_name=timezone_name, override=now_override),
         }
         return json.dumps(payload, ensure_ascii=False)
 
@@ -94,9 +87,9 @@ def create_travel_read_mcp_server():
         name="get_current_time",
         description="获取当前时间，默认时区为 Asia/Shanghai。",
     )
-    def get_current_time(timezone_name: str = "Asia/Shanghai") -> str:
-        logger.info(f"TravelReadTools 获取当前时间: timezone={timezone_name}")
-        return service.current_time(timezone_name)
+    def get_current_time(timezone_name: str = "Asia/Shanghai", now_override: str = "") -> str:
+        logger.info(f"TravelReadTools 获取当前时间: timezone={timezone_name}, now_override={now_override or '<real-time>'}")
+        return service.current_time(timezone_name, now_override)
 
     logger.info("=== TravelRead MCP 服务器信息 ===")
     logger.info(f"名称: {travel_read_mcp.name}")

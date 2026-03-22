@@ -95,6 +95,20 @@ class Config:
         self.default_username = _first_env("SMARTVOYAGE_DEFAULT_USERNAME", default="demo_user")
         self.default_user_phone = _first_env("SMARTVOYAGE_DEFAULT_USER_PHONE", default="13800000000")
 
+        # 时间与工作流持久化配置
+        self.timezone_name = _first_env(
+            "SMARTVOYAGE_TIMEZONE",
+            default="Asia/Shanghai",
+        )
+        self.now_override = _first_env(
+            "SMARTVOYAGE_NOW_OVERRIDE",
+            default="",
+        )
+        self.order_checkpoint_path = _first_env(
+            "SMARTVOYAGE_ORDER_CHECKPOINT_PATH",
+            default=str(PROJECT_ROOT / "data" / "checkpoints" / "transport_order.pkl"),
+        )
+
         # 日志配置
         self.log_file = _first_env(
             "SMARTVOYAGE_LOG_FILE",

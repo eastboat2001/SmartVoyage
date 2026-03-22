@@ -12,6 +12,7 @@ class AgentInvokeRequest(BaseModel):
     text: str
     conversation_history: str = ""
     request_id: str = ""
+    now_override: str = ""
 
 
 class AgentInvokeResponse(BaseModel):

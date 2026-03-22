@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any
 
 import httpx
-import pytz
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
@@ -18,11 +15,15 @@ from main_prompts import SmartVoyagePrompts
 from utils.db import get_db_connection
 from utils.request_context import clear_request_id, ensure_request_id
 from utils.resilient_llm import ResilientModelInvoker
+from utils.order_action_context import with_order_action
 from utils.service_protocol import AgentInvokeRequest, AgentInvokeResponse
 from utils.structured_outputs import (
+    AutoOrderIntentResult,
     IntentRecognitionResult,
+    TravelQueryContextResult,
     TransportDecisionPlanResult,
 )
+from utils.time_utils import get_current_date_str
 from utils.travel_read_context import extract_travel_read_kind, strip_travel_read_kind, with_travel_read_kind
 
 
@@ -117,6 +118,7 @@ class TransportDecisionWorkflowState(TypedDict, total=False):
     ticket_result_data: dict[str, Any]
     order_result_text: str
     order_result_state: str
+    order_result_pending_context: dict[str, Any]
     final_response: str
 
 
@@ -201,7 +203,7 @@ class SmartVoyageOrchestrator:
                 conn.close()
 
     def recognize_intent(self, user_input: str, conversation_history: str):
-        current_date = datetime.now(pytz.timezone("Asia/Shanghai")).strftime("%Y-%m-%d")
+        current_date = get_current_date_str(self.config)
         result = self.invoker.invoke_structured(
             SmartVoyagePrompts.intent_prompt(),
             IntentRecognitionResult,
@@ -215,6 +217,18 @@ class SmartVoyageOrchestrator:
         logger.info(f"意图识别结构化响应: {result.model_dump()}")
         return result.intents, result.user_queries, result.follow_up_message
 
+    def _analyze_travel_query_context(self, query: str) -> TravelQueryContextResult:
+        result = self.invoker.invoke_structured(
+            SmartVoyagePrompts.travel_query_context_prompt(),
+            TravelQueryContextResult,
+            {
+                "query": query,
+            },
+            description="交通查询上下文分析",
+        )
+        logger.info(f"交通查询上下文分析结果: {result.model_dump()}")
+        return result
+
     def process_user_input(
         self,
         prompt: str,
@@ -227,15 +241,6 @@ class SmartVoyageOrchestrator:
         try:
             if pending_order_context and pending_order_context.get("action") == "hitl_review":
                 return self._handle_hitl_review(prompt, conversation_history, pending_order_context)
-
-            precheck_follow_up = self._precheck_home_city_follow_up(prompt, user_profile)
-            if precheck_follow_up:
-                return {
-                    "response": precheck_follow_up,
-                    "intents": [],
-                    "routed_agents": [],
-                    "pending_order_context": pending_order_context or {},
-                }
 
             intents, user_queries, follow_up_message = self.recognize_intent(
                 prompt,
@@ -278,7 +283,6 @@ class SmartVoyageOrchestrator:
 
             if "transport_decision" in intents:
                 result = self._handle_transport_decision(prompt, conversation_history, user_queries, intents, user_profile)
-                result["pending_order_context"] = {}
                 return result
 
             responses: list[str] = []
@@ -327,9 +331,40 @@ class SmartVoyageOrchestrator:
         review_query = self._with_pending_order_context(prompt, pending_order_context)
         result = self._call_agent("TransportOrderAgent", review_query, conversation_history)
         next_pending = result.pending_order_context or {}
+        review_payload = next_pending.get("review_payload", {}) if isinstance(next_pending, dict) else {}
+        if not review_payload and isinstance(pending_order_context, dict):
+            review_payload = pending_order_context.get("review_payload", {}) or {}
+        resume_intent = str(next_pending.get("resume_intent", "")).strip()
+        if not resume_intent and isinstance(pending_order_context, dict):
+            resume_intent = str(pending_order_context.get("resume_intent", "")).strip()
+        if not resume_intent:
+            review_action = str(review_payload.get("action", "")).strip()
+            resume_intent = "order" if review_action == "create_order" else review_action or "order"
+        elif resume_intent == "create_order":
+            resume_intent = "order"
+
+        source_intent = ""
+        source_routed_agents: list[str] = ["TransportOrderAgent"]
+        response_prefix = ""
+        if isinstance(pending_order_context, dict):
+            source_intent = str(pending_order_context.get("source_intent", "")).strip()
+            source_routed_agents = list(pending_order_context.get("source_routed_agents", source_routed_agents))
+            response_prefix = str(pending_order_context.get("response_prefix", "")).strip()
+
+        response_text = self._finalize_agent_response("TransportOrderAgent", review_query, result)
+        if source_intent == "transport_decision":
+            if response_prefix:
+                response_text = f"{response_prefix}\n\n预订结果：{response_text}"
+            return {
+                "response": response_text,
+                "intents": ["transport_decision"],
+                "routed_agents": source_routed_agents,
+                "pending_order_context": next_pending,
+            }
+
         return {
-            "response": self._finalize_agent_response("TransportOrderAgent", review_query, result),
-            "intents": ["order"],
+            "response": response_text,
+            "intents": [resume_intent],
             "routed_agents": ["TransportOrderAgent"],
             "pending_order_context": next_pending,
         }
@@ -355,6 +390,7 @@ class SmartVoyageOrchestrator:
             "response": result["final_response"],
             "intents": intents,
             "routed_agents": result.get("routed_agents", []),
+            "pending_order_context": result.get("order_result_pending_context", {}),
         }
 
     def _prepare_transport_decision_state(self, state: TransportDecisionWorkflowState) -> dict[str, Any]:
@@ -397,11 +433,22 @@ class SmartVoyageOrchestrator:
                 "query": state["decision_query"],
                 "weather_result": state["weather_result_text"],
                 "user_preferences": state["user_profile_summary"],
-                "current_date": datetime.now(pytz.timezone("Asia/Shanghai")).strftime("%Y-%m-%d"),
+                "current_date": get_current_date_str(self.config, override=self.config.now_override),
             },
             description="交通决策规划",
         )
-        return {"plan": plan.model_dump()}
+        plan_payload = plan.model_dump()
+        auto_order = self.invoker.invoke_structured(
+            SmartVoyagePrompts.auto_order_intent_prompt(),
+            AutoOrderIntentResult,
+            {
+                "query": state["decision_query"],
+            },
+            description="自动下单意图判断",
+        )
+        if auto_order.should_order:
+            plan_payload["should_order"] = True
+        return {"plan": plan_payload}
 
     def _transport_decision_ticket_node(self, state: TransportDecisionWorkflowState) -> dict[str, Any]:
         plan = state["plan"]
@@ -441,6 +488,7 @@ class SmartVoyageOrchestrator:
         return {
             "order_result_text": order_result.text,
             "order_result_state": order_result.state,
+            "order_result_pending_context": order_result.pending_order_context or {},
             "routed_agents": list(dict.fromkeys(state.get("routed_agents", []) + ["TransportOrderAgent"])),
         }
 
@@ -457,6 +505,7 @@ class SmartVoyageOrchestrator:
             f"出行建议：建议优先选择{self._transport_label(plan['transport_mode'])}。{plan['recommendation_reason']}",
             f"票务结果：{self._finalize_agent_response('TravelDecisionAgent', with_travel_read_kind(plan['ticket_query'], 'ticket'), ticket_result)}",
         ]
+        response_prefix = "\n\n".join(sections)
 
         if plan.get("should_order"):
             if state.get("ticket_result_state") == "completed" and state.get("order_result_text"):
@@ -485,7 +534,16 @@ class SmartVoyageOrchestrator:
         elif state.get("weather_no_data"):
             sections.insert(0, "天气数据提醒：当前数据库里没有命中对应日期的天气数据，以下建议基于缺失天气数据时的保守策略。")
 
-        return {"final_response": "\n\n".join(sections)}
+        pending_context = dict(state.get("order_result_pending_context", {}) or {})
+        if pending_context:
+            pending_context.setdefault("source_intent", "transport_decision")
+            pending_context.setdefault("source_routed_agents", list(dict.fromkeys(state.get("routed_agents", []) + ["TransportOrderAgent"])))
+            pending_context.setdefault("response_prefix", response_prefix)
+
+        return {
+            "final_response": "\n\n".join(sections),
+            "order_result_pending_context": pending_context,
+        }
 
     def _maybe_follow_up_with_home_city(
         self,
@@ -503,9 +561,8 @@ class SmartVoyageOrchestrator:
         query = user_queries.get(target_intent, "")
         if not query:
             return ""
-        if self._has_explicit_departure_city(query):
-            return ""
-        if not self._looks_like_ticket_or_travel_query(query):
+        context = self._analyze_travel_query_context(query)
+        if not context.needs_home_city_follow_up:
             return ""
         return (
             f"你这次是从{user_profile.home_city}出发吗？"
@@ -518,11 +575,8 @@ class SmartVoyageOrchestrator:
         normalized = prompt.strip()
         if not normalized:
             return ""
-        if self._has_explicit_departure_city(normalized):
-            return ""
-        if not self._looks_like_ticket_or_travel_query(normalized):
-            return ""
-        if not self._looks_like_missing_departure_query(normalized):
+        context = self._analyze_travel_query_context(normalized)
+        if not context.needs_home_city_follow_up:
             return ""
         return (
             f"你这次是从{user_profile.home_city}出发吗？"
@@ -550,7 +604,7 @@ class SmartVoyageOrchestrator:
 
         if agent_name == "TravelDecisionAgent" and read_kind == "ticket":
             clean_query = strip_travel_read_kind(query_str)
-            direct_response = self._build_ticket_fact_response(clean_query, result.text)
+            direct_response = self._build_ticket_fact_response(clean_query, result.data or {})
             if direct_response:
                 return direct_response
             return self.invoker.invoke_text(
@@ -597,6 +651,7 @@ class SmartVoyageOrchestrator:
                         text=chat_history,
                         conversation_history=conversation_history,
                         request_id=request_id,
+                        now_override=self.config.now_override,
                     ).model_dump(),
                     headers={"x-request-id": request_id},
                 )
@@ -680,9 +735,17 @@ class SmartVoyageOrchestrator:
     def _with_user_context(self, intent: str, query: str) -> str:
         if intent not in {"order", "my_orders", "cancel_order", "change_order"}:
             return query
-        if "当前用户" in query:
-            return query
-        return f"当前用户：{self.current_username}\n{query}"
+
+        action_map = {
+            "order": "create_order",
+            "my_orders": "query_orders",
+            "cancel_order": "cancel_order",
+            "change_order": "change_order",
+        }
+        query_with_action = with_order_action(query, action_map[intent])
+        if "当前用户" in query_with_action:
+            return query_with_action
+        return f"当前用户：{self.current_username}\n{query_with_action}"
 
     @staticmethod
     def _with_pending_order_context(query: str, pending_order_context: dict) -> str:
@@ -696,82 +759,28 @@ class SmartVoyageOrchestrator:
         payload = json.dumps(pending_order_context, ensure_ascii=False)
         return f"继续处理之前的订单操作。待补上下文：{payload}。本轮补充：{prompt}"
 
-    def _build_ticket_fact_response(self, query_str: str, raw_text: str) -> str:
-        normalized_query = query_str.replace("当前用户：", "")
-        is_inventory_query = any(keyword in normalized_query for keyword in ("余票", "还有多少", "多少张", "剩余"))
-        if not is_inventory_query:
+    def _build_ticket_fact_response(self, query_str: str, ticket_data: dict[str, Any]) -> str:
+        query_plan = ticket_data.get("query_plan", {}) if isinstance(ticket_data, dict) else {}
+        tickets = ticket_data.get("tickets", []) if isinstance(ticket_data, dict) else []
+        if not isinstance(query_plan, dict) or not isinstance(tickets, list) or not tickets:
+            return ""
+        if not str(query_plan.get("transport_no", "")).strip():
             return ""
 
-        first_line = next((line.strip() for line in raw_text.splitlines() if line.strip()), "")
-        if not first_line:
-            return raw_text
-
-        train_match = re.search(
-            r"(?P<departure>\S+)\s+到\s+(?P<arrival>\S+)\s+(?P<departure_time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}): "
-            r"车次\s+(?P<transport_no>\S+)，(?P<ticket_type>[^，]+)，票价\s+(?P<price>[\d.]+)元，剩余\s+(?P<remaining>\d+)\s+张",
-            first_line,
-        )
-        flight_match = re.search(
-            r"(?P<departure>\S+)\s+到\s+(?P<arrival>\S+)\s+(?P<departure_time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}): "
-            r"航班\s+(?P<transport_no>\S+)，(?P<ticket_type>[^，]+)，票价\s+(?P<price>[\d.]+)元，剩余\s+(?P<remaining>\d+)\s+张",
-            first_line,
-        )
-        match = train_match or flight_match
-        if not match:
-            return raw_text
-
-        info = match.groupdict()
+        info = tickets[0]
         response = (
-            f"{info['departure_time']} {info['departure']}到{info['arrival']} "
-            f"{info['transport_no']} {info['ticket_type']}当前剩余 {info['remaining']} 张，"
-            f"票价 {info['price']} 元。"
+            f"{info.get('departure_time', '')} {info.get('departure_city', '')}到{info.get('arrival_city', '')} "
+            f"{info.get('transport_no', '')} {info.get('ticket_type', '')}当前剩余 {info.get('remaining_seats', '')} 张，"
+            f"票价 {info.get('price', '')} 元。"
         )
         order_context = self._related_order_context(
-            departure_time=info["departure_time"],
-            transport_no=info["transport_no"],
-            ticket_type=info["ticket_type"],
+            departure_time=str(info.get("departure_time", "")),
+            transport_no=str(info.get("transport_no", "")),
+            ticket_type=str(info.get("ticket_type", "")),
         )
         if order_context:
             response += order_context
         return response
-
-    @staticmethod
-    def _has_explicit_departure_city(query: str) -> bool:
-        normalized = query.replace("当前用户：", "")
-        patterns = [
-            r"从[\u4e00-\u9fa5]{2,10}到[\u4e00-\u9fa5]{2,10}",
-            r"[\u4e00-\u9fa5]{2,10}到[\u4e00-\u9fa5]{2,10}",
-            r"从[\u4e00-\u9fa5]{2,10}去[\u4e00-\u9fa5]{2,10}",
-            r"[\u4e00-\u9fa5]{2,10}飞[\u4e00-\u9fa5]{2,10}",
-        ]
-        return any(re.search(pattern, normalized) for pattern in patterns)
-
-    @staticmethod
-    def _looks_like_ticket_or_travel_query(query: str) -> bool:
-        keywords = (
-            "票",
-            "高铁",
-            "火车",
-            "机票",
-            "航班",
-            "飞机",
-            "出发",
-            "去",
-            "坐高铁",
-            "坐飞机",
-        )
-        return any(keyword in query for keyword in keywords)
-
-    @staticmethod
-    def _looks_like_missing_departure_query(query: str) -> bool:
-        normalized = query.replace("当前用户：", "")
-        missing_departure_patterns = [
-            r"去[\u4e00-\u9fa5]{2,10}的?(高铁票|火车票|机票|票)",
-            r"到[\u4e00-\u9fa5]{2,10}的?(高铁票|火车票|机票|票)",
-            r"去[\u4e00-\u9fa5]{2,10}(坐高铁|坐飞机|怎么去|的票)",
-            r"到[\u4e00-\u9fa5]{2,10}(坐高铁|坐飞机|的票)",
-        ]
-        return any(re.search(pattern, normalized) for pattern in missing_departure_patterns)
 
     def _related_order_context(self, *, departure_time: str, transport_no: str, ticket_type: str) -> str:
         conn = None

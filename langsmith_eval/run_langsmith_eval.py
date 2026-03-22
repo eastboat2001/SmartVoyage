@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 import sys
@@ -41,6 +42,8 @@ def build_inputs(case: dict[str, Any]) -> dict[str, Any]:
         "side_effect": bool(case.get("side_effect", False)),
         "setup_profile": case.get("setup_profile", "baseline"),
         "db_assertions": case.get("db_assertions", {}),
+        "now_override": case.get("now_override", ""),
+        "auto_approve_hitl": bool(case.get("auto_approve_hitl", case.get("side_effect", False))),
     }
 
 
@@ -147,6 +150,24 @@ def seed_case_setup(case_inputs: dict[str, Any], config: Config) -> None:
     raise ValueError(f"不支持的 setup_profile: {profile}")
 
 
+@contextmanager
+def case_now_override(case_inputs: dict[str, Any]):
+    key = "SMARTVOYAGE_NOW_OVERRIDE"
+    override = str(case_inputs.get("now_override", "")).strip()
+    previous = os.getenv(key)
+    if override:
+        os.environ[key] = override
+    else:
+        os.environ.pop(key, None)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
+
+
 def _build_where_clause(assertion_filter: dict[str, Any]) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     params: list[Any] = []
@@ -201,42 +222,54 @@ def capture_db_metrics(case_inputs: dict[str, Any], config: Config) -> dict[str,
 
 
 def run_case(turns: list[str], case_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
-    config = Config()
     case_inputs = case_inputs or {}
-    if case_inputs.get("side_effect"):
-        reset_database(config)
-        seed_case_setup(case_inputs, config)
+    with case_now_override(case_inputs):
+        config = Config()
+        if case_inputs.get("side_effect"):
+            reset_database(config)
+            seed_case_setup(case_inputs, config)
 
-    db_metrics_before = capture_db_metrics(case_inputs, config) if case_inputs.get("side_effect") else {}
+        db_metrics_before = capture_db_metrics(case_inputs, config) if case_inputs.get("side_effect") else {}
 
-    orchestrator = SmartVoyageOrchestrator(config)
-    conversation_history = ""
-    pending_order_context: dict[str, Any] = {}
-    result: dict[str, Any] | None = None
+        orchestrator = SmartVoyageOrchestrator(config)
+        conversation_history = ""
+        pending_order_context: dict[str, Any] = {}
+        result: dict[str, Any] | None = None
 
-    for turn in turns:
-        result = orchestrator.process_user_input(
-            turn,
-            conversation_history,
-            pending_order_context,
-        )
-        assistant_response = result["response"]
-        conversation_history += f"\nUser: {turn}\nAssistant: {assistant_response}"
-        pending_order_context = result.get("pending_order_context", {}) or {}
+        for turn in turns:
+            result = orchestrator.process_user_input(
+                turn,
+                conversation_history,
+                pending_order_context,
+            )
+            assistant_response = result["response"]
+            conversation_history += f"\nUser: {turn}\nAssistant: {assistant_response}"
+            pending_order_context = result.get("pending_order_context", {}) or {}
 
-    assert result is not None
+            if case_inputs.get("auto_approve_hitl") and pending_order_context.get("action") == "hitl_review":
+                approval_turn = "yes"
+                result = orchestrator.process_user_input(
+                    approval_turn,
+                    conversation_history,
+                    pending_order_context,
+                )
+                assistant_response = result["response"]
+                conversation_history += f"\nUser: {approval_turn}\nAssistant: {assistant_response}"
+                pending_order_context = result.get("pending_order_context", {}) or {}
 
-    db_metrics_after = capture_db_metrics(case_inputs, config) if case_inputs.get("side_effect") else {}
+        assert result is not None
 
-    return {
-        "response": result["response"],
-        "intents": result.get("intents", []),
-        "routed_agents": result.get("routed_agents", []),
-        "pending_empty": not bool(result.get("pending_order_context")),
-        "pending_order_context": result.get("pending_order_context", {}) or {},
-        "db_metrics_before": db_metrics_before,
-        "db_metrics_after": db_metrics_after,
-    }
+        db_metrics_after = capture_db_metrics(case_inputs, config) if case_inputs.get("side_effect") else {}
+
+        return {
+            "response": result["response"],
+            "intents": result.get("intents", []),
+            "routed_agents": result.get("routed_agents", []),
+            "pending_empty": not bool(result.get("pending_order_context")),
+            "pending_order_context": result.get("pending_order_context", {}) or {},
+            "db_metrics_before": db_metrics_before,
+            "db_metrics_after": db_metrics_after,
+        }
 
 
 def intent_match(inputs: dict[str, Any], outputs: dict[str, Any], reference_outputs: dict[str, Any]) -> dict[str, Any]:

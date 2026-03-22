@@ -1,16 +1,12 @@
 """
 travel_decision_server.py：统一交通读取与决策前置 FastAPI 服务，负责天气、时间、票务查询。
 """
-import asyncio
 import json
 import os
 import sys
-from datetime import datetime
 
-import pytz
 import uvicorn
 from fastapi import FastAPI
-from langchain_core.prompts import ChatPromptTemplate
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
@@ -18,6 +14,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config
 from create_logger import logger
+from main_prompts import SmartVoyagePrompts
 from utils.fastapi_middleware import install_common_middleware
 from utils.request_context import ensure_request_id, set_request_id
 from utils.resilient_llm import ResilientModelInvoker
@@ -27,7 +24,8 @@ from utils.service_protocol import (
     AgentMetadataResponse,
     AgentSkillDescriptor,
 )
-from utils.structured_outputs import TicketSqlResult, WeatherSqlResult
+from utils.structured_outputs import TicketQueryPlanResult, TravelReadKindResult, WeatherQueryPlanResult
+from utils.time_utils import get_current_date_str
 from utils.travel_read_context import extract_travel_read_kind, strip_travel_read_kind
 
 
@@ -50,89 +48,6 @@ SERVICE_SKILLS = [
     )
 ]
 
-WEATHER_SCHEMA = """
-CREATE TABLE IF NOT EXISTS weather_data (
-id INT AUTO_INCREMENT PRIMARY KEY,
-city VARCHAR(50) NOT NULL,
-fx_date DATE NOT NULL,
-sunrise TIME,
-sunset TIME,
-temp_max INT,
-temp_min INT,
-text_day VARCHAR(20),
-text_night VARCHAR(20),
-wind_dir_day VARCHAR(20),
-precip DECIMAL(5,1),
-humidity INT,
-UNIQUE KEY unique_city_date (city, fx_date)
-) ENGINE=INNODB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='天气数据表';
-"""
-
-TICKET_SCHEMA = """
-CREATE TABLE train_tickets (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    departure_city VARCHAR(50) NOT NULL,
-    arrival_city VARCHAR(50) NOT NULL,
-    departure_time DATETIME NOT NULL,
-    arrival_time DATETIME NOT NULL,
-    train_number VARCHAR(20) NOT NULL,
-    seat_type VARCHAR(20) NOT NULL,
-    total_seats INT NOT NULL,
-    remaining_seats INT NOT NULL,
-    price DECIMAL(10, 2) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY unique_train (departure_time, train_number)
-);
-
-CREATE TABLE flight_tickets (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    departure_city VARCHAR(50) NOT NULL,
-    arrival_city VARCHAR(50) NOT NULL,
-    departure_time DATETIME NOT NULL,
-    arrival_time DATETIME NOT NULL,
-    flight_number VARCHAR(20) NOT NULL,
-    cabin_type VARCHAR(20) NOT NULL,
-    total_seats INT NOT NULL,
-    remaining_seats INT NOT NULL,
-    price DECIMAL(10, 2) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY unique_flight (departure_time, flight_number)
-);
-"""
-
-WEATHER_SQL_PROMPT = ChatPromptTemplate.from_template(
-    """
-系统提示：你是一个专业的天气 SQL 生成器，需要从对话历史中提取天气查询所需字段，并基于 weather_data 表生成 SELECT 语句。
-- 如果用户需要查天气，则至少需要城市和时间信息。
-- 信息不足时，返回 status='input_required' 和 message。
-- 信息足够时，返回 status='sql' 和 sql。
-- 只返回符合结构化 schema 的字段值，不要输出 markdown 代码块，不要补充解释。
-
-weather_data表结构：{table_schema_string}
-对话历史：{conversation}
-当前日期：{current_date} (Asia/Shanghai)
-"""
-)
-
-TICKET_SQL_PROMPT = ChatPromptTemplate.from_template(
-    """
-系统提示：你是一个专业的票务 SQL 生成器，需要从对话历史中提取用户查询火车票或机票所需字段，并基于 train_tickets、flight_tickets 表生成 SELECT 语句。
-- 意图有2种：train 或 flight。
-- 只查询指定字段：
-  - train_tickets: id, departure_city, arrival_city, departure_time, arrival_time, train_number, seat_type, price, remaining_seats
-  - flight_tickets: id, departure_city, arrival_city, departure_time, arrival_time, flight_number, cabin_type, price, remaining_seats
-- 如果缺少必要信息，则返回 status='input_required' 并填写 message。
-- 必要信息为：
-  - flight/train: 【departure_city, arrival_city, date】 或 【train_number/flight_number】
-- 只返回符合结构化 schema 的字段值，不要输出 markdown 代码块，不要补充解释。
-
-表结构：{table_schema_string}
-对话历史：{conversation}
-当前日期：{current_date} (Asia/Shanghai)
-"""
-)
-
-
 async def call_travel_read_tool(tool_name: str, params: dict) -> str:
     try:
         async with streamablehttp_client("http://127.0.0.1:8001/mcp") as (read, write, _):
@@ -151,10 +66,6 @@ class TravelDecisionService:
         self.invoker = ResilientModelInvoker(conf)
 
     @staticmethod
-    def current_date() -> str:
-        return datetime.now(pytz.timezone("Asia/Shanghai")).strftime("%Y-%m-%d")
-
-    @staticmethod
     def latest_query(conversation: str) -> str:
         marker = "\nUser:"
         if marker in conversation:
@@ -168,39 +79,97 @@ class TravelDecisionService:
         if explicit_kind:
             return explicit_kind
         query = self.latest_query(conversation)
-        if any(keyword in query for keyword in ("几点", "当前时间", "现在时间", "今天几号", "日期", "星期几")):
-            return "time"
-        if any(keyword in query for keyword in ("天气", "气温", "降水", "湿度", "风力", "风向")):
-            return "weather"
-        return "ticket"
-
-    def generate_weather_sql(self, conversation: str) -> dict:
         result = self.invoker.invoke_structured(
-            WEATHER_SQL_PROMPT,
-            WeatherSqlResult,
+            SmartVoyagePrompts.travel_read_kind_prompt(),
+            TravelReadKindResult,
             {
-                "conversation": strip_travel_read_kind(conversation),
-                "current_date": self.current_date(),
-                "table_schema_string": WEATHER_SCHEMA,
+                "conversation_history": conversation,
+                "query": query,
             },
-            description="TravelDecision 天气 SQL 生成",
+            description="TravelDecision 读取类型分类",
         )
-        logger.info(f"TravelDecision 天气 SQL 输出: {result.model_dump()}")
+        logger.info(f"TravelDecision 读取类型结构化输出: {result.model_dump()}")
+        return result.kind
+
+    @staticmethod
+    def _sql_literal(value: str) -> str:
+        return value.replace("'", "''")
+
+    def generate_weather_plan(self, conversation: str, now_override: str = "") -> dict:
+        result = self.invoker.invoke_structured(
+            SmartVoyagePrompts.weather_query_plan_prompt(),
+            WeatherQueryPlanResult,
+            {
+                "conversation_history": conversation,
+                "query": strip_travel_read_kind(self.latest_query(conversation)),
+                "current_date": get_current_date_str(conf, override=now_override),
+            },
+            description="TravelDecision 天气查询计划生成",
+        )
+        logger.info(f"TravelDecision 天气查询计划输出: {result.model_dump()}")
         return result.model_dump()
 
-    def generate_ticket_sql(self, conversation: str) -> dict:
+    def generate_ticket_plan(self, conversation: str, now_override: str = "") -> dict:
         result = self.invoker.invoke_structured(
-            TICKET_SQL_PROMPT,
-            TicketSqlResult,
+            SmartVoyagePrompts.ticket_query_plan_prompt(),
+            TicketQueryPlanResult,
             {
-                "conversation": strip_travel_read_kind(conversation),
-                "current_date": self.current_date(),
-                "table_schema_string": TICKET_SCHEMA,
+                "conversation_history": conversation,
+                "query": strip_travel_read_kind(self.latest_query(conversation)),
+                "current_date": get_current_date_str(conf, override=now_override),
             },
-            description="TravelDecision 票务 SQL 生成",
+            description="TravelDecision 票务查询计划生成",
         )
-        logger.info(f"TravelDecision 票务 SQL 输出: {result.model_dump()}")
+        logger.info(f"TravelDecision 票务查询计划输出: {result.model_dump()}")
         return result.model_dump()
+
+    def compile_weather_sql(self, plan: dict) -> str:
+        city = self._sql_literal(plan["city"].strip())
+        date_from = self._sql_literal(plan["date_from"].strip())
+        date_to = self._sql_literal((plan.get("date_to") or plan["date_from"]).strip())
+        # Query plan is structured by the LLM; SQL shape stays under backend control.
+        return (
+            "SELECT city, fx_date, temp_max, temp_min, text_day, text_night, humidity, wind_dir_day, precip "
+            "FROM weather_data "
+            f"WHERE city = '{city}' "
+            f"AND fx_date >= '{date_from}' "
+            f"AND fx_date <= '{date_to}' "
+            "ORDER BY fx_date ASC "
+            "LIMIT 7"
+        )
+
+    def compile_ticket_sql(self, plan: dict) -> str:
+        query_type = plan["type"]
+        table_name = "train_tickets" if query_type == "train" else "flight_tickets"
+        transport_column = "train_number" if query_type == "train" else "flight_number"
+        ticket_type_column = "seat_type" if query_type == "train" else "cabin_type"
+        # Query plan controls filters; backend controls table, fields, sort and limit.
+        select_columns = (
+            f"id, departure_city, arrival_city, departure_time, arrival_time, {transport_column}, "
+            f"{ticket_type_column}, price, remaining_seats"
+        )
+        filters: list[str] = []
+        if plan.get("departure_city", "").strip():
+            filters.append(f"departure_city = '{self._sql_literal(plan['departure_city'].strip())}'")
+        if plan.get("arrival_city", "").strip():
+            filters.append(f"arrival_city = '{self._sql_literal(plan['arrival_city'].strip())}'")
+        if plan.get("date_from", "").strip():
+            filters.append(f"DATE(departure_time) >= '{self._sql_literal(plan['date_from'].strip())}'")
+        if plan.get("date_to", "").strip():
+            filters.append(f"DATE(departure_time) <= '{self._sql_literal(plan['date_to'].strip())}'")
+        if plan.get("transport_no", "").strip():
+            filters.append(f"{transport_column} = '{self._sql_literal(plan['transport_no'].strip())}'")
+        if plan.get("ticket_type", "").strip():
+            filters.append(f"{ticket_type_column} = '{self._sql_literal(plan['ticket_type'].strip())}'")
+        where_clause = " AND ".join(filters) if filters else "1=1"
+        limit = int(plan.get("limit", 10) or 10)
+        return (
+            f"SELECT {select_columns} "
+            f"FROM {table_name} "
+            f"WHERE {where_clause} "
+            "ORDER BY departure_time ASC "
+            f"LIMIT {min(max(limit, 1), 20)}"
+        )
 
     @staticmethod
     def format_weather_response(response: dict) -> tuple[str, str, dict]:
@@ -292,45 +261,60 @@ class TravelDecisionService:
         request_id = request.request_id or ensure_request_id()
         set_request_id(request_id)
         logger.info(f"[{request_id}] TravelDecision 收到对话: {request.text}")
+        now_override = request.now_override.strip()
         kind = self.infer_kind(request.text)
         logger.info(f"[{request_id}] TravelDecision 读取类型: {kind}")
 
         if kind == "time":
-            raw = await call_travel_read_tool("get_current_time", {"timezone_name": "Asia/Shanghai"})
+            raw = await call_travel_read_tool(
+                "get_current_time",
+                {"timezone_name": "Asia/Shanghai", "now_override": now_override},
+            )
             response = json.loads(raw) if isinstance(raw, str) else raw
             state, text, data = self.format_time_response(response)
             return AgentInvokeResponse(state=state, text=text, data=data, meta={"kind": "time", "tool": "get_current_time"})
 
         if kind == "weather":
-            gen_result = self.generate_weather_sql(request.text)
-            if gen_result["status"] == "input_required":
-                return AgentInvokeResponse(state="input_required", text=gen_result["message"], data={"kind": "weather", "weather_days": []}, meta={"kind": "weather"})
-            raw = await call_travel_read_tool("query_weather", {"sql": gen_result["sql"]})
+            plan = self.generate_weather_plan(request.text, now_override=now_override)
+            if plan["status"] == "input_required":
+                return AgentInvokeResponse(
+                    state="input_required",
+                    text=plan["message"],
+                    data={"kind": "weather", "weather_days": [], "query_plan": plan},
+                    meta={"kind": "weather", "query_plan": plan},
+                )
+            sql = self.compile_weather_sql(plan)
+            logger.info(f"[{request_id}] TravelDecision 天气 SQL 编译结果: {sql}")
+            raw = await call_travel_read_tool("query_weather", {"sql": sql})
             response = json.loads(raw) if isinstance(raw, str) else raw
             state, text, data = self.format_weather_response(response)
+            data["query_plan"] = plan
             return AgentInvokeResponse(
                 state=state,
                 text=text,
                 data=data,
-                meta={"kind": "weather", "tool": "query_weather", "sql": gen_result["sql"], "row_count": len(data.get("weather_days", []))},
+                meta={"kind": "weather", "tool": "query_weather", "query_plan": plan, "sql": sql, "row_count": len(data.get("weather_days", []))},
             )
 
-        gen_result = self.generate_ticket_sql(request.text)
-        if gen_result["status"] == "input_required":
+        plan = self.generate_ticket_plan(request.text, now_override=now_override)
+        if plan["status"] == "input_required":
             return AgentInvokeResponse(
                 state="input_required",
-                text=gen_result["message"],
-                data={"kind": "ticket", "query_type": gen_result.get("type", ""), "tickets": []},
-                meta={"kind": "ticket"},
+                text=plan["message"],
+                data={"kind": "ticket", "query_type": plan.get("type", ""), "tickets": [], "query_plan": plan},
+                meta={"kind": "ticket", "query_plan": plan},
             )
-        raw = await call_travel_read_tool("query_tickets", {"sql": gen_result["sql"]})
+        sql = self.compile_ticket_sql(plan)
+        logger.info(f"[{request_id}] TravelDecision 票务 SQL 编译结果: {sql}")
+        raw = await call_travel_read_tool("query_tickets", {"sql": sql})
         response = json.loads(raw) if isinstance(raw, str) else raw
-        state, text, data = self.format_ticket_response(response, gen_result["type"])
+        state, text, data = self.format_ticket_response(response, plan["type"])
+        data["query_plan"] = plan
         return AgentInvokeResponse(
             state=state,
             text=text,
             data=data,
-            meta={"kind": "ticket", "tool": "query_tickets", "sql": gen_result["sql"], "row_count": len(data.get("tickets", []))},
+            meta={"kind": "ticket", "tool": "query_tickets", "query_plan": plan, "sql": sql, "row_count": len(data.get("tickets", []))},
         )
 
 

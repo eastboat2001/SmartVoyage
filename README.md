@@ -9,6 +9,9 @@
 - 时间查询
 - 天气查询
 - 火车票 / 机票查询
+- 相对日期查询
+  - 支持今天 / 明天 / 后天
+  - 支持在 LangSmith 中通过固定时钟做稳定回归
 - 查询我的订单
 - 购买交通票
 - 退票
@@ -107,6 +110,15 @@ SmartVoyage 是一个基于 `LangChain + LangGraph + FastAPI + MCP` 的交通出
 - `meta`
   - 调试和追踪使用的元信息
 
+当前主线对自然语言理解采用“结构化抽取优先”的策略：
+
+- orchestrator 负责统一意图识别
+- `TravelDecisionAgent` 对读取类型优先消费显式 `kind` 上下文，缺失时再做结构化分类
+- `TravelDecisionAgent` 的天气 / 票务查询先生成结构化 `Query Plan`，再由后端编译为受控 SQL
+- `TransportOrderAgent` 对订单动作优先消费显式 `order_action` 上下文，缺失时再做结构化分类
+- HITL 审批回复通过结构化决策映射为 `approved / rejected / unclear`
+- 订单查询日期与自动下单意图也优先走结构化抽取，而不是依赖固定短语或日期正则
+
 ### `mcp_server/`
 
 - [mcp_travel_read_server.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/mcp_server/mcp_travel_read_server.py)
@@ -120,6 +132,8 @@ SmartVoyage 是一个基于 `LangChain + LangGraph + FastAPI + MCP` 的交通出
   - 主编排入口
 - [structured_outputs.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/utils/structured_outputs.py)
   - 结构化 schema
+- [order_action_context.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/utils/order_action_context.py)
+  - 订单域显式动作上下文
 - [service_protocol.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/utils/service_protocol.py)
   - A2A 协议对象
 - [fastapi_middleware.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/utils/fastapi_middleware.py)
@@ -137,9 +151,11 @@ SmartVoyage 是一个基于 `LangChain + LangGraph + FastAPI + MCP` 的交通出
 ### `langsmith_eval/`
 
 - [cases.json](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/langsmith_eval/cases.json)
-  - 当前混合基础回归集（无副作用 + 副作用）
+  - 当前自动化基础回归集（仅非 HITL 快测样例）
 - [run_langsmith_eval.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/langsmith_eval/run_langsmith_eval.py)
   - LangSmith runner
+- [HITL_MANUAL_TESTS.md](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/HITL_MANUAL_TESTS.md)
+  - 人工审核链路的手工测试说明
 
 ### `sql/`
 
@@ -293,24 +309,41 @@ CLI 会显示类似提示：
 当前实现说明：
 
 - 已使用 LangGraph checkpoint + interrupt/resume
-- 当前 checkpointer 为进程内存级
-- 如果重启 `TransportOrderAgent` 服务，未完成的审批线程会丢失
+- 当前 checkpointer 已持久化到文件，默认路径为 `data/checkpoints/transport_order.pkl`
+- 重启 `TransportOrderAgent` 服务后，只要客户端仍持有 `pending_order_context.thread_id`，即可继续审批恢复
+- 如果 CLI 本身丢失了待审批上下文，仍需要重新发起该操作
 
 ## 7. LangSmith 评测
 
-当前统一使用一个 [cases.json](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/langsmith_eval/cases.json) 作为基础测试集，同时包含：
+当前自动化评测统一使用一个 [cases.json](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/langsmith_eval/cases.json) 作为最终自动化基础集，当前共 19 条，覆盖：
 
-- 无副作用基线
-  - 时间查询
-  - 天气查询
-  - 火车票查询
-  - 机票查询
-  - `transport_decision` 只建议链路
-- 副作用基线
-  - 直接下单
-  - 退票
-  - 改签
-  - `transport_decision` 自动下单
+- 时间查询
+  - 当前时间
+  - 星期 / 日期类表达
+- 天气查询
+  - 单天绝对日期
+  - 多天范围查询
+  - 相对日期查询
+- 票务查询
+  - 高铁按路线查询
+  - 高铁按车次查询
+  - 机票按路线查询
+  - 机票按航班号查询
+  - 相对日期票务查询
+- `transport_decision`
+  - 绝对日期只建议链路
+  - 相对日期只建议链路
+- 订单查询
+  - 查询我的订单
+  - 当前订单 / 查询当前订单
+  - 相对日期订单查询
+- 订单域多轮补参
+  - 退票缺信息追问
+  - 改签缺信息追问
+
+涉及人工审核的订单副作用执行链路，当前不放入自动化基础集，而是单独放在：
+
+- [HITL_MANUAL_TESTS.md](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/HITL_MANUAL_TESTS.md)
 
 运行前要求：
 
@@ -342,11 +375,10 @@ CLI 会显示类似提示：
 
 说明：
 
-- runner 会在每条副作用 case 执行前自动重建数据库，并按 `setup_profile` 注入前置订单
-- 当前副作用断言使用数据库前后指标差值：
-  - 订单行数变化
-  - 票务库存字段变化
-- 如果你后续要补更难的测试，可以继续直接往同一个 `cases.json` 里追加
+- 相对日期 case 可以通过 `now_override` 固定当前时间，避免测试结果随真实日期漂移
+- 当前自动化集优先覆盖非 HITL 稳定链路，便于高频快测
+- 如果你后续要补更难的自动化测试，可以继续直接往同一个 `cases.json` 里追加
+- 人工审核与副作用链路建议继续按 [HITL_MANUAL_TESTS.md](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/HITL_MANUAL_TESTS.md) 手工回归
 
 ## 8. 日志
 
@@ -377,4 +409,5 @@ CLI 会显示类似提示：
 - 景点
 - 多日 travel planning
 - Web 前端
-- 持久化 checkpoint / 跨重启恢复的 HITL
+
+
