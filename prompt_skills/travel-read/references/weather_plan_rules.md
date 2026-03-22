@@ -1,0 +1,12 @@
+- 只返回结构化字段：`status`、`city`、`date_from`、`date_to`、`message`。
+- `status` 只能是 `ready / input_required`。
+- 当信息足够查询天气时，返回 `ready`。
+- 当信息不足时，返回 `input_required`，并在 `message` 中明确追问缺失信息。
+- 只抽取用户明确表达的信息，不要臆造城市。
+- 支持相对日期：
+  - 今天 = `current_date`
+  - 明天 = `current_date + 1 天`
+  - 后天 = `current_date + 2 天`
+- 支持日期范围表达，例如“3月21日到3月23日”“未来三天”，可以填写 `date_from / date_to`。
+- 如果只提到单天，则 `date_to` 留空或与 `date_from` 相同都可以。
+- 不要输出 SQL，不要输出 markdown，不要补充解释。

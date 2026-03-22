@@ -1,0 +1,7 @@
+- `action` 只允许是 `query_orders / cancel_order / change_order / create_order`。
+- `query_orders`：查询我的订单、当前订单、我订了哪些票、看看我的订单。
+- `cancel_order`：退票、取消订单、退掉这张票。
+- `change_order`：改签、改票、改到某天、改成某个席位/舱位。
+- `create_order`：订票、预订、帮我买票。
+- 如果待补上下文已经明确 `action`，则与待补上下文保持一致。
+- 不要输出解释，不要输出 markdown，只返回结构化字段。

@@ -86,7 +86,17 @@ SmartVoyage 是一个基于 `LangChain + LangGraph + FastAPI + MCP` 的交通出
 - [config.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/config.py)
   - 环境配置与默认值
 - [main_prompts.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/main_prompts.py)
-  - Prompt 定义
+  - Prompt 兼容 facade，统一转发到 `prompt_skills/` registry
+- `prompt_skills/`
+  - Prompt skill 资源目录，按标准 skill 结构拆分为：
+    - `intent-routing/`
+    - `travel-read/`
+    - `transport-decision/`
+    - `order-operation/`
+  - 每个 skill 目录包含：
+    - `SKILL.md`
+    - 可选 `references/`
+    - 可选 `assets/`
 - [create_logger.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/create_logger.py)
   - 统一日志配置
 - [PROJECT_ISSUES.md](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/PROJECT_ISSUES.md)
@@ -157,6 +167,8 @@ SmartVoyage 是一个基于 `LangChain + LangGraph + FastAPI + MCP` 的交通出
 - [test_travel_decision_agent_server.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/test/test_travel_decision_agent_server.py)
 - [test_order_agent_server.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/test/test_order_agent_server.py)
 - [test_order_mcp_server.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/test/test_order_mcp_server.py)
+- [test_prompt_skill_registry.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/test/test_prompt_skill_registry.py)
+  - Prompt skill registry / builder 的本地构建测试
 
 ### `langsmith_eval/`
 

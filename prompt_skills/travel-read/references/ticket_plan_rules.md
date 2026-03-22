@@ -1,0 +1,18 @@
+- 只返回结构化字段：`status`、`type`、`departure_city`、`arrival_city`、`date_from`、`date_to`、`transport_no`、`ticket_type`、`limit`、`message`。
+- `status` 只能是 `ready / input_required`。
+- `type` 只能是 `train / flight`。
+- 当用户明确提到高铁、火车、动车、列车等，`type=train`。
+- 当用户明确提到机票、航班、飞机等，`type=flight`。
+- 若信息不足以查询，则返回 `input_required`，并在 `message` 中明确追问缺失信息。
+- 足够查询的最小条件为：
+  - `transport_no` 已明确；或
+  - `departure_city + arrival_city + date_from` 已明确
+- 支持相对日期：
+  - 今天 = `current_date`
+  - 明天 = `current_date + 1 天`
+  - 后天 = `current_date + 2 天`
+- 支持日期范围表达，例如“3月21日到3月23日”“未来三天”，可填写 `date_from / date_to`。
+- `ticket_type` 仅在用户明确说出席位/舱位时填写，例如“二等座”“商务座”“经济舱”。
+- `transport_no` 仅在用户明确说出车次/航班号时填写。
+- `limit` 默认给 10；如果用户明确要求更多或更少，可以调整，但范围保持在 1 到 20。
+- 不要输出 SQL，不要输出 markdown，不要补充解释。

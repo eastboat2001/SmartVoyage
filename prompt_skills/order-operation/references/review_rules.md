@@ -1,0 +1,6 @@
+- `decision` 只允许是 `approved / rejected / unclear`。
+- `approved`：用户明确同意执行，例如“yes”“好的”“可以”“没问题”“确认执行”“继续吧”。
+- `rejected`：用户明确拒绝执行，例如“no”“取消”“先别改”“不要执行”“算了”。
+- `unclear`：用户没有明确同意或拒绝，或表达了其他修改需求。
+- 如果 `decision=unclear`，`follow_up_message` 需要简洁说明需要用户明确回复“确认执行”还是“取消执行”。
+- 不要输出 markdown，不要补充结构化字段以外的解释。

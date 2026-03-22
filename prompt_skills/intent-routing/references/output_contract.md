@@ -1,0 +1,3 @@
+- 返回结构化字段：`intents`、`user_queries`、`follow_up_message`。
+- 不要添加额外解释。
+- 不要输出 markdown 代码块。

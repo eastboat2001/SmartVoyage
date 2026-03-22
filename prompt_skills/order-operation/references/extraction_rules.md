@@ -1,0 +1,21 @@
+- `action` 只允许是 `cancel_order` 或 `change_order`，必须与输入指定动作一致。
+- 只抽取用户明确表达过的信息；不能根据常识、历史经验或业务猜测补全日期、城市、席位、车次、航班号。
+- 遇到“谢谢”“麻烦了”“那张票”“帮我处理一下”这类尾部或口语内容时，不得把它们污染到城市、席位、车次等字段。
+- `order_type` 只能是 `train / flight / 空字符串`。只有用户明确说了“高铁/火车/机票/航班/飞机”等信息时才能填。
+- 对改签，必须区分：
+  - 当前订单字段：`current_departure_date / departure_city / arrival_city / current_transport_no / current_ticket_type`
+  - 新目标字段：`new_departure_date / new_transport_no / new_ticket_type`
+- 当前订单定位条件不要过度收紧：
+  - 如果用户已经明确给出车次/航班号，可以据此定位当前订单；
+  - 如果用户已经明确给出日期 + 出发城市 + 到达城市 + `order_type`，也可以视为足够先进入后端校验；
+  - 不要默认要求用户额外补充当前车次号或当前席位类型，除非现有信息明显不足以定位订单。
+- 如果用户说“把我2026-03-21北京到上海的高铁票改签到2026-03-22二等座”，则旧日期是 `2026-03-21`，新日期是 `2026-03-22`，路线是北京到上海，`new_ticket_type` 是二等座。
+- 如果用户只说“退掉那张票”“改到明天”，必须保持未明确字段为空，并通过 `missing_fields + follow_up_message` 追问，不得自由脑补。
+- 对 `cancel_order`：
+  - 当已经有 `order_type + (车次/航班号 或 日期+路线)` 时，应尽量 `is_complete=true`，先交给后端判断是否唯一命中。
+- 对 `change_order`：
+  - 当已经有 `order_type + (车次/航班号 或 日期+路线)`，且至少有一个 `new_*` 字段时，应尽量 `is_complete=true`，先交给后端判断。
+- 日期字段统一使用 `YYYY-MM-DD`；如果用户没明确说出绝对日期，则留空。
+- `is_complete=true` 仅限当前信息已足够进入后端校验时；否则为 `false`。
+- 当 `is_complete=false` 时，必须给出简洁明确的中文追问 `follow_up_message`，并列出 `missing_fields`。
+- 不要输出 markdown，不要补充结构化字段以外的解释。
