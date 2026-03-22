@@ -15,8 +15,12 @@ r"""
 连命令行入口一起启动：
 .\.venv\Scripts\python.exe run_all.py --with-cli
 
-"""
+连 FastAPI 前端页面一起启动：
+.\.venv\Scripts\python.exe run_all.py --with-web
 
+同时启动后端、Web 页面和 CLI：
+.\.venv\Scripts\python.exe run_all.py --with-web --with-cli
+"""
 
 
 ROOT = Path(__file__).resolve().parent
@@ -31,7 +35,9 @@ SERVICES = [
     ("a2a-order", [PYTHON, "-u", "a2a_server/order_server.py"]),
 ]
 
+WEB_SERVICE = ("web-ui", [PYTHON, "-u", "web_app.py"])
 CLI_SERVICE = ("main-cli", [PYTHON, "main.py"])
+
 
 def terminate_process(process: subprocess.Popen) -> None:
     if process.poll() is not None:
@@ -56,6 +62,8 @@ def log_path_for(name: str) -> Path:
         return LOG_DIR / "mcp.log"
     if name.startswith("a2a-"):
         return LOG_DIR / "a2a.log"
+    if name.startswith("web-"):
+        return LOG_DIR / "web.log"
     return LOG_DIR / f"{name}.log"
 
 
@@ -80,18 +88,6 @@ def start_process(name: str, command: list[str]) -> tuple[subprocess.Popen, Path
     return process, log_path
 
 
-def start_interactive_process(name: str, command: list[str]) -> subprocess.Popen:
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["PYTHONUTF8"] = "1"
-    env["SMARTVOYAGE_LOG_FILE"] = str(LOG_DIR / "app.log")
-    return subprocess.Popen(
-        command,
-        cwd=ROOT,
-        env=env,
-    )
-
-
 def run_interactive_process(name: str, command: list[str]) -> int:
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
@@ -107,11 +103,15 @@ def run_interactive_process(name: str, command: list[str]) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Start SmartVoyage services.")
-    mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument(
+    parser.add_argument(
         "--with-cli",
         action="store_true",
         help="Also start the command-line entrypoint.",
+    )
+    parser.add_argument(
+        "--with-web",
+        action="store_true",
+        help="Also start the FastAPI web frontend on http://127.0.0.1:8501.",
     )
     parser.add_argument(
         "--startup-delay",
@@ -131,10 +131,19 @@ def main() -> int:
             print(f"[launcher] started {name} -> {log_path.relative_to(ROOT)}")
             time.sleep(args.startup_delay)
 
+        if args.with_web:
+            process, log_path = start_process(*WEB_SERVICE)
+            processes.append((WEB_SERVICE[0], process, log_path))
+            print(f"[launcher] started {WEB_SERVICE[0]} -> {log_path.relative_to(ROOT)}")
+            print("[launcher] web frontend -> http://127.0.0.1:8501")
+            time.sleep(args.startup_delay)
+
         print("[launcher] all requested processes started, press Ctrl+C to stop")
         print("[launcher] mcp service output -> logs/mcp.log")
         print("[launcher] a2a service output -> logs/a2a.log")
         print("[launcher] application logger -> logs/app.log")
+        if args.with_web:
+            print("[launcher] web frontend output -> logs/web.log")
 
         if args.with_cli:
             return run_interactive_process(*CLI_SERVICE)
@@ -147,13 +156,10 @@ def main() -> int:
             ]
             if failed:
                 for name, returncode, log_path in failed:
-                    if log_path.name == "CONSOLE":
-                        print(f"[launcher] {name} exited with code {returncode}.")
-                    else:
-                        print(
-                            f"[launcher] {name} exited with code {returncode}. "
-                            f"See {log_path.relative_to(ROOT)} for details."
-                        )
+                    print(
+                        f"[launcher] {name} exited with code {returncode}. "
+                        f"See {log_path.relative_to(ROOT)} for details."
+                    )
                 return 1
             time.sleep(1)
 

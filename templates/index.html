@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SmartVoyage Console</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}">
+</head>
+<body>
+    <div class="page-shell">
+        <aside class="side-panel">
+            <div class="brand-card">
+                <p class="eyebrow">SmartVoyage</p>
+                <h1>交通出行智能助手</h1>
+                <p class="brand-copy">基于 FastAPI、LangChain、LangGraph 与 MCP 的可调试前端页面。</p>
+                <div class="user-chip">当前演示用户：{{ username }}</div>
+            </div>
+
+            <section class="panel-block">
+                <div class="panel-title-row">
+                    <h2>Agent Cards</h2>
+                    <span class="status-pill">在线</span>
+                </div>
+                <div class="agent-list">
+                    {% for agent in agent_cards %}
+                    <article class="agent-card">
+                        <h3>{{ agent.name }}</h3>
+                        <p>{{ agent.description }}</p>
+                        <div class="agent-meta">{{ agent.url }}</div>
+                        <ul>
+                            {% for skill in agent.skills %}
+                            <li>{{ skill.name }}: {{ skill.description }}</li>
+                            {% endfor %}
+                        </ul>
+                    </article>
+                    {% endfor %}
+                </div>
+            </section>
+
+            <section class="panel-block">
+                <h2>快捷示例</h2>
+                <div class="quick-actions">
+                    <button data-prompt="现在几点">现在几点</button>
+                    <button data-prompt="查询2026-03-21杭州的天气">查天气</button>
+                    <button data-prompt="查询2026-03-21北京到上海的高铁票">查高铁票</button>
+                    <button data-prompt="根据2026-03-21上海的天气，帮我判断从北京去上海坐高铁还是飞机更合适，不要下单">做交通建议</button>
+                    <button data-prompt="查询我的订单">查订单</button>
+                </div>
+            </section>
+        </aside>
+
+        <main class="chat-panel">
+            <header class="chat-header">
+                <div>
+                    <p class="eyebrow">Session</p>
+                    <h2>可视化调试会话</h2>
+                </div>
+                <div class="chat-actions">
+                    <button id="resetBtn" class="secondary-btn">重置会话</button>
+                </div>
+            </header>
+
+            <section id="chatLog" class="chat-log"></section>
+
+            <section id="routeMeta" class="route-meta"></section>
+
+            <footer class="composer">
+                <textarea id="messageInput" placeholder="输入问题，例如：查询2026-03-21北京到上海的高铁票"></textarea>
+                <button id="sendBtn" class="primary-btn">发送</button>
+            </footer>
+        </main>
+    </div>
+
+    <div id="hitlOverlay" class="hitl-overlay hidden">
+        <div class="hitl-card">
+            <p class="eyebrow">HITL Review</p>
+            <h3>待审批操作</h3>
+            <div id="hitlSummary" class="hitl-summary"></div>
+            <p class="hitl-hint">请先处理当前审批。确认或取消后，才能继续提交新的业务请求。</p>
+            <div class="hitl-actions">
+                <button id="approveBtn" class="primary-btn">yes，确认执行</button>
+                <button id="rejectBtn" class="secondary-btn">no，取消执行</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        window.SMARTVOYAGE_BOOTSTRAP = {
+            sessionId: "{{ session_id }}",
+            username: "{{ username }}"
+        };
+    </script>
+    <script src="{{ url_for('static', path='app.js') }}"></script>
+</body>
+</html>

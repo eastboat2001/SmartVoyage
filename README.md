@@ -26,7 +26,7 @@
 - 酒店
 - 景点
 - 旧 `travel_plan`
-- Web / Streamlit 前端
+- Streamlit 前端
 
 ## 1. 项目简介
 
@@ -60,7 +60,7 @@ SmartVoyage 是一个基于 `LangChain + LangGraph + FastAPI + MCP` 的交通出
 - A2A 服务承载：`FastAPI / ASGI`
 - MCP 服务承载：`FastAPI / ASGI`
 - 数据库：`MySQL`
-- 交互入口：CLI
+- 交互入口：CLI + FastAPI 页面
 - 模型接入：
   - `openai_compatible`
   - `ollama`
@@ -77,8 +77,10 @@ SmartVoyage 是一个基于 `LangChain + LangGraph + FastAPI + MCP` 的交通出
   - 当前主规格文档
 - [main.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/main.py)
   - CLI 入口
+- [web_app.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/web_app.py)
+  - FastAPI Web 页面入口
 - [run_all.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/run_all.py)
-  - 一键启动 4 个后端服务
+  - 一键启动后端服务，并可选拉起 CLI / Web 页面
 - [config.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/config.py)
   - 环境配置与默认值
 - [main_prompts.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/main_prompts.py)
@@ -87,6 +89,12 @@ SmartVoyage 是一个基于 `LangChain + LangGraph + FastAPI + MCP` 的交通出
   - 统一日志配置
 - [PROJECT_ISSUES.md](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/PROJECT_ISSUES.md)
   - 当前主线问题与重构经验总结
+- [templates/index.html](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/templates/index.html)
+  - Web 页面模板
+- [static/app.css](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/static/app.css)
+  - Web 页面样式
+- [static/app.js](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/static/app.js)
+  - Web 页面交互脚本
 
 ### `a2a_server/`
 
@@ -241,7 +249,23 @@ Copy-Item .env.example .env
 .\.venv\Scripts\python.exe run_all.py --with-cli
 ```
 
-### 5.3 单独启动 CLI
+### 5.3 启动后端并打开 FastAPI 页面
+
+```powershell
+.\.venv\Scripts\python.exe run_all.py --with-web
+```
+
+页面地址：
+
+- `http://127.0.0.1:8501`
+
+### 5.4 同时启动后端、Web 页面和 CLI
+
+```powershell
+.\.venv\Scripts\python.exe run_all.py --with-web --with-cli
+```
+
+### 5.5 单独启动 CLI
 
 在后端服务已经启动后：
 
@@ -249,6 +273,13 @@ Copy-Item .env.example .env
 .\.venv\Scripts\python.exe main.py
 ```
 
+### 5.6 单独启动 FastAPI 页面
+
+在后端服务已经启动后：
+
+```powershell
+.\.venv\Scripts\python.exe web_app.py
+```
 ## 6. 健康检查与联调
 
 ### 6.1 健康检查
@@ -256,6 +287,7 @@ Copy-Item .env.example .env
 ```powershell
 curl http://127.0.0.1:5005/health
 curl http://127.0.0.1:5007/health
+curl http://127.0.0.1:8501/health
 ```
 
 MCP 的 `/mcp` 端点是 SSE 协议，不适合直接裸 `curl` 当普通 JSON 接口使用。
@@ -409,5 +441,7 @@ CLI 会显示类似提示：
 - 景点
 - 多日 travel planning
 - Web 前端
+
+
 
 
