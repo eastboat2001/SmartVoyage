@@ -1,11 +1,12 @@
 # HITL_MANUAL_TESTS
 
-本文档用于手工验证 LangGraph HITL 人工审核链路。默认自动化 LangSmith 基础集不再覆盖这些场景。
+本文档用于手工验证 LangGraph HITL 人工审核链路。默认自动化 LangSmith 基础集不再覆盖这些场景。手工回归既可在 CLI 中完成，也可在 FastAPI Web 页面中完成。
 
 ## 前置条件
 
 - 已启动后端服务：`.\.venv\Scripts\python.exe run_all.py`
 - 已启动命令行：`.\.venv\Scripts\python.exe main.py`
+- 或已启动 Web 页面：`.\.venv\Scripts\python.exe run_all.py --with-web` 后访问 `http://127.0.0.1:8501`
 - 当前演示用户使用 `demo_user`
 - 如需固定相对日期，可在 `.env` 中设置：`SMARTVOYAGE_NOW_OVERRIDE=2026-03-21T09:00:00+08:00`
 
@@ -220,3 +221,4 @@ yes
 - `yes/no` 后的最终回复
 - 是否符合预期
 - 若失败，对应 `logs/app.log`、`logs/a2a.log`、`logs/mcp.log` 的关键错误
+- 如果是在 Web 页面联调失败，也建议同时检查 `logs/web.log`

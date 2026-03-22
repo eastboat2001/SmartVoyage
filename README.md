@@ -6,6 +6,7 @@
 
 当前主线已经收敛为交通出行购票 Agent，已完成这些能力：
 
+- FastAPI Web 调试页面
 - 时间查询
 - 天气查询
 - 火车票 / 机票查询
@@ -27,6 +28,7 @@
 - 景点
 - 旧 `travel_plan`
 - Streamlit 前端
+- 面向最终用户的完整产品化前端
 
 ## 1. 项目简介
 
@@ -48,7 +50,7 @@ SmartVoyage 是一个基于 `LangChain + LangGraph + FastAPI + MCP` 的交通出
   - 当前时间
   - 天气数据
   - 火车票 / 机票数据
-- `TransportOrderTools`
+- `OrderTools`
   - 订单创建 / 查询 / 取消 / 改签
   - 库存扣减 / 回补
 
@@ -132,7 +134,7 @@ SmartVoyage 是一个基于 `LangChain + LangGraph + FastAPI + MCP` 的交通出
 - [mcp_travel_read_server.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/mcp_server/mcp_travel_read_server.py)
   - `TravelReadTools`
 - [mcp_order_server.py](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/mcp_server/mcp_order_server.py)
-  - `TransportOrderTools`
+  - `OrderTools`
 
 ### `utils/`
 
@@ -239,7 +241,7 @@ Copy-Item .env.example .env
 默认会拉起：
 
 - `TravelReadTools` on `8001`
-- `TransportOrderTools` on `8003`
+- `OrderTools` on `8003`
 - `TravelDecisionAgent` on `5005`
 - `TransportOrderAgent` on `5007`
 
@@ -422,6 +424,8 @@ CLI 会显示类似提示：
   - A2A 服务日志
 - [mcp.log](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/logs/mcp.log)
   - MCP 服务日志
+- [web.log](/e:/Workstudy/projectstudy/04_Project/02_AIProject/Agent/SmartVoyage/04_Code/sh01_agent/SmartVoyage/logs/web.log)
+  - FastAPI Web 页面日志
 
 当前日志统一携带 `request_id`，用于串联 orchestrator、A2A、MCP 之间的请求链路。
 
@@ -440,7 +444,7 @@ CLI 会显示类似提示：
 - 酒店
 - 景点
 - 多日 travel planning
-- Web 前端
+- 面向最终用户的完整产品化前端（当前仅提供调试型 FastAPI 页面）
 
 
 
