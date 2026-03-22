@@ -5,9 +5,12 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 import httpx
 import pytz
+from langgraph.graph import END, START, StateGraph
+from typing_extensions import TypedDict
 
 from config import Config
 from create_logger import logger
@@ -62,6 +65,8 @@ class AgentExecutionResult:
     degraded: bool = False
     no_data: bool = False
     pending_order_context: dict | None = None
+    data: dict | None = None
+    meta: dict | None = None
 
 
 @dataclass
@@ -92,6 +97,29 @@ class UserPreferenceProfile:
         return "；".join(parts)
 
 
+class TransportDecisionWorkflowState(TypedDict, total=False):
+    prompt: str
+    conversation_history: str
+    intents: list[str]
+    user_queries: dict[str, str]
+    user_profile_summary: str
+    decision_query: str
+    weather_query: str
+    routed_agents: list[str]
+    weather_result_text: str
+    weather_result_state: str
+    weather_result_data: dict[str, Any]
+    weather_degraded: bool
+    weather_no_data: bool
+    plan: dict[str, Any]
+    ticket_result_text: str
+    ticket_result_state: str
+    ticket_result_data: dict[str, Any]
+    order_result_text: str
+    order_result_state: str
+    final_response: str
+
+
 class SmartVoyageOrchestrator:
     def __init__(self, config: Config):
         self.config = config
@@ -99,6 +127,32 @@ class SmartVoyageOrchestrator:
         self.agent_urls = dict(DEFAULT_AGENT_URLS)
         self.agent_metadata = dict(DEFAULT_AGENT_METADATA)
         self.current_username = config.default_username
+        self.transport_decision_workflow = self._build_transport_decision_workflow()
+
+    def _build_transport_decision_workflow(self):
+        workflow = StateGraph(TransportDecisionWorkflowState)
+        workflow.add_node("prepare", self._prepare_transport_decision_state)
+        workflow.add_node("weather", self._transport_decision_weather_node)
+        workflow.add_node("plan", self._transport_decision_plan_node)
+        workflow.add_node("ticket", self._transport_decision_ticket_node)
+        workflow.add_node("order", self._transport_decision_order_node)
+        workflow.add_node("finalize", self._transport_decision_finalize_node)
+
+        workflow.add_edge(START, "prepare")
+        workflow.add_edge("prepare", "weather")
+        workflow.add_edge("weather", "plan")
+        workflow.add_edge("plan", "ticket")
+        workflow.add_conditional_edges(
+            "ticket",
+            self._route_transport_decision_after_ticket,
+            {
+                "order": "order",
+                "finalize": "finalize",
+            },
+        )
+        workflow.add_edge("order", "finalize")
+        workflow.add_edge("finalize", END)
+        return workflow.compile()
 
     def _load_user_preferences(self) -> UserPreferenceProfile:
         conn = None
@@ -171,6 +225,9 @@ class SmartVoyageOrchestrator:
         logger.info(f"[{request_id}] orchestrator received prompt")
         user_profile = self._load_user_preferences()
         try:
+            if pending_order_context and pending_order_context.get("action") == "hitl_review":
+                return self._handle_hitl_review(prompt, conversation_history, pending_order_context)
+
             precheck_follow_up = self._precheck_home_city_follow_up(prompt, user_profile)
             if precheck_follow_up:
                 return {
@@ -261,6 +318,22 @@ class SmartVoyageOrchestrator:
         finally:
             clear_request_id()
 
+    def _handle_hitl_review(
+        self,
+        prompt: str,
+        conversation_history: str,
+        pending_order_context: dict[str, Any],
+    ) -> dict:
+        review_query = self._with_pending_order_context(prompt, pending_order_context)
+        result = self._call_agent("TransportOrderAgent", review_query, conversation_history)
+        next_pending = result.pending_order_context or {}
+        return {
+            "response": self._finalize_agent_response("TransportOrderAgent", review_query, result),
+            "intents": ["order"],
+            "routed_agents": ["TransportOrderAgent"],
+            "pending_order_context": next_pending,
+        }
+
     def _handle_transport_decision(
         self,
         prompt: str,
@@ -269,14 +342,37 @@ class SmartVoyageOrchestrator:
         intents: list[str],
         user_profile: UserPreferenceProfile,
     ) -> dict:
-        weather_query = user_queries.get("weather", prompt)
-        decision_query = user_queries.get("transport_decision", prompt)
+        result = self.transport_decision_workflow.invoke(
+            {
+                "prompt": prompt,
+                "conversation_history": conversation_history,
+                "intents": intents,
+                "user_queries": user_queries,
+                "user_profile_summary": user_profile.summary_text(),
+            }
+        )
+        return {
+            "response": result["final_response"],
+            "intents": intents,
+            "routed_agents": result.get("routed_agents", []),
+        }
+
+    def _prepare_transport_decision_state(self, state: TransportDecisionWorkflowState) -> dict[str, Any]:
+        prompt = state["prompt"]
+        user_queries = state["user_queries"]
+        return {
+            "decision_query": user_queries.get("transport_decision", prompt),
+            "weather_query": user_queries.get("weather", prompt),
+            "routed_agents": [],
+        }
+
+    def _transport_decision_weather_node(self, state: TransportDecisionWorkflowState) -> dict[str, Any]:
+        weather_query = state["weather_query"]
         weather_result = self._call_agent(
             "TravelDecisionAgent",
             with_travel_read_kind(weather_query, "weather"),
-            conversation_history,
+            state["conversation_history"],
         )
-
         weather_text = weather_result.text
         if weather_result.state == "completed":
             weather_text = self.invoker.invoke_text(
@@ -284,64 +380,112 @@ class SmartVoyageOrchestrator:
                 {"query": weather_query, "raw_response": weather_result.text},
                 description="天气总结",
             )
-        elif weather_result.no_data:
-            weather_text = weather_result.text
+        return {
+            "weather_result_text": weather_text,
+            "weather_result_state": weather_result.state,
+            "weather_result_data": weather_result.data or {},
+            "weather_degraded": weather_result.degraded,
+            "weather_no_data": weather_result.no_data,
+            "routed_agents": ["TravelDecisionAgent"],
+        }
 
+    def _transport_decision_plan_node(self, state: TransportDecisionWorkflowState) -> dict[str, Any]:
         plan = self.invoker.invoke_structured(
             SmartVoyagePrompts.transport_decision_prompt(),
             TransportDecisionPlanResult,
             {
-                "query": decision_query,
-                "weather_result": weather_text,
-                "user_preferences": user_profile.summary_text(),
+                "query": state["decision_query"],
+                "weather_result": state["weather_result_text"],
+                "user_preferences": state["user_profile_summary"],
                 "current_date": datetime.now(pytz.timezone("Asia/Shanghai")).strftime("%Y-%m-%d"),
             },
             description="交通决策规划",
         )
+        return {"plan": plan.model_dump()}
 
+    def _transport_decision_ticket_node(self, state: TransportDecisionWorkflowState) -> dict[str, Any]:
+        plan = state["plan"]
+        ticket_query = plan["ticket_query"]
         ticket_result = self._call_agent(
             "TravelDecisionAgent",
-            with_travel_read_kind(plan.ticket_query, "ticket"),
-            conversation_history,
+            with_travel_read_kind(ticket_query, "ticket"),
+            state["conversation_history"],
         )
-        routed_agents = ["TravelDecisionAgent"]
+        return {
+            "ticket_result_text": ticket_result.text,
+            "ticket_result_state": ticket_result.state,
+            "ticket_result_data": ticket_result.data or {},
+            "routed_agents": list(dict.fromkeys(state.get("routed_agents", []) + ["TravelDecisionAgent"])),
+        }
 
+    @staticmethod
+    def _route_transport_decision_after_ticket(state: TransportDecisionWorkflowState) -> str:
+        if state["plan"].get("should_order") and state.get("ticket_result_state") == "completed":
+            return "order"
+        return "finalize"
+
+    def _transport_decision_order_node(self, state: TransportDecisionWorkflowState) -> dict[str, Any]:
+        plan = state["plan"]
+        order_query = self._build_order_query(
+            travel_query=state["decision_query"],
+            transport_mode=plan["transport_mode"],
+            ticket_result_text=state.get("ticket_result_text", ""),
+            ticket_result_data=state.get("ticket_result_data", {}),
+        )
+        order_query = self._with_user_context("order", order_query)
+        order_result = self._call_agent(
+            "TransportOrderAgent",
+            order_query,
+            state["conversation_history"],
+        )
+        return {
+            "order_result_text": order_result.text,
+            "order_result_state": order_result.state,
+            "routed_agents": list(dict.fromkeys(state.get("routed_agents", []) + ["TransportOrderAgent"])),
+        }
+
+    def _transport_decision_finalize_node(self, state: TransportDecisionWorkflowState) -> dict[str, Any]:
+        plan = state["plan"]
+        ticket_result = AgentExecutionResult(
+            agent_name="TravelDecisionAgent",
+            state=state.get("ticket_result_state", "failed"),
+            text=state.get("ticket_result_text", ""),
+            data=state.get("ticket_result_data", {}),
+        )
         sections = [
-            f"天气判断：{plan.weather_brief or weather_text}",
-            f"出行建议：建议优先选择{self._transport_label(plan.transport_mode)}。{plan.recommendation_reason}",
-            f"票务结果：{self._finalize_agent_response('TravelDecisionAgent', with_travel_read_kind(plan.ticket_query, 'ticket'), ticket_result)}",
+            f"天气判断：{plan.get('weather_brief') or state.get('weather_result_text', '')}",
+            f"出行建议：建议优先选择{self._transport_label(plan['transport_mode'])}。{plan['recommendation_reason']}",
+            f"票务结果：{self._finalize_agent_response('TravelDecisionAgent', with_travel_read_kind(plan['ticket_query'], 'ticket'), ticket_result)}",
         ]
 
-        if plan.should_order:
-            if ticket_result.state == "completed":
-                order_query = self._build_order_query(
-                    travel_query=decision_query,
-                    transport_mode=plan.transport_mode,
-                    ticket_result_text=ticket_result.text,
+        if plan.get("should_order"):
+            if state.get("ticket_result_state") == "completed" and state.get("order_result_text"):
+                order_result = AgentExecutionResult(
+                    agent_name="TransportOrderAgent",
+                    state=state.get("order_result_state", "failed"),
+                    text=state.get("order_result_text", ""),
                 )
-                order_query = self._with_user_context("order", order_query)
-                order_result = self._call_agent(
-                    "TransportOrderAgent",
-                    order_query,
-                    conversation_history,
+                order_query = self._with_user_context(
+                    "order",
+                    self._build_order_query(
+                        travel_query=state["decision_query"],
+                        transport_mode=plan["transport_mode"],
+                        ticket_result_text=state.get("ticket_result_text", ""),
+                        ticket_result_data=state.get("ticket_result_data", {}),
+                    ),
                 )
-                routed_agents.append("TransportOrderAgent")
                 sections.append(
                     f"预订结果：{self._finalize_agent_response('TransportOrderAgent', order_query, order_result)}"
                 )
             else:
                 sections.append("预订结果：由于前一步没有查到可用票务数据，本次没有继续提交订票请求。")
 
-        if weather_result.degraded:
+        if state.get("weather_degraded"):
             sections.insert(0, "协作降级：天气服务暂时不可用，当前建议基于保守策略继续完成票务协作。")
-        elif weather_result.no_data:
+        elif state.get("weather_no_data"):
             sections.insert(0, "天气数据提醒：当前数据库里没有命中对应日期的天气数据，以下建议基于缺失天气数据时的保守策略。")
 
-        return {
-            "response": "\n\n".join(sections),
-            "intents": intents,
-            "routed_agents": routed_agents,
-        }
+        return {"final_response": "\n\n".join(sections)}
 
     def _maybe_follow_up_with_home_city(
         self,
@@ -480,6 +624,8 @@ class SmartVoyageOrchestrator:
             degraded=state == "failed",
             no_data="未找到" in text,
             pending_order_context=payload.pending_order_context or None,
+            data=payload.data or None,
+            meta=payload.meta or None,
         )
 
     def _run_sync(self, coro):
@@ -670,7 +816,23 @@ class SmartVoyageOrchestrator:
         travel_query: str,
         transport_mode: str,
         ticket_result_text: str,
+        ticket_result_data: dict[str, Any] | None = None,
     ) -> str:
+        tickets = (ticket_result_data or {}).get("tickets", [])
+        if tickets:
+            ticket = tickets[0]
+            transport_no = ticket.get("transport_no", "")
+            ticket_type = ticket.get("ticket_type", "")
+            departure_date = str(ticket.get("departure_time", ""))[:10]
+            departure_city = ticket.get("departure_city", "")
+            arrival_city = ticket.get("arrival_city", "")
+            transport_label = "高铁票" if transport_mode == "train" else "机票"
+            return (
+                f"请直接预订{departure_date}{departure_city}到{arrival_city}的{transport_label}，"
+                f"{'车次' if transport_mode == 'train' else '航班'}{transport_no}，"
+                f"{ticket_type}1张。"
+            )
+
         transport_label = "高铁票" if transport_mode == "train" else "机票"
         first_ticket_line = ticket_result_text.splitlines()[0].strip()
         return (

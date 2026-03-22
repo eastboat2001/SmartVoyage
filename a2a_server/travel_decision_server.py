@@ -203,7 +203,7 @@ class TravelDecisionService:
         return result.model_dump()
 
     @staticmethod
-    def format_weather_response(response: dict) -> tuple[str, str]:
+    def format_weather_response(response: dict) -> tuple[str, str, dict]:
         if response.get("status") == "success":
             data = response.get("data", [])
             response_text = "\n".join(
@@ -212,34 +212,73 @@ class TravelDecisionService:
                     for d in data
                 ]
             )
-            return "completed", response_text
+            return "completed", response_text, {"kind": "weather", "weather_days": data}
         if response.get("status") == "no_data":
-            return "input_required", response.get("message", "未找到天气数据，请确认城市和日期。")
-        return "failed", response.get("message", "天气查询失败，请稍后重试。")
+            return "input_required", response.get("message", "未找到天气数据，请确认城市和日期。"), {"kind": "weather", "weather_days": []}
+        return "failed", response.get("message", "天气查询失败，请稍后重试。"), {"kind": "weather", "weather_days": []}
 
     @staticmethod
-    def format_ticket_response(response: dict, query_type: str) -> tuple[str, str]:
+    def format_ticket_response(response: dict, query_type: str) -> tuple[str, str, dict]:
         if response.get("status") == "success":
             data = response.get("data", [])
             lines: list[str] = []
+            tickets: list[dict] = []
             for item in data:
                 if query_type == "train":
+                    tickets.append(
+                        {
+                            "departure_city": item["departure_city"],
+                            "arrival_city": item["arrival_city"],
+                            "departure_time": item["departure_time"],
+                            "arrival_time": item["arrival_time"],
+                            "transport_no": item["train_number"],
+                            "ticket_type": item["seat_type"],
+                            "price": item["price"],
+                            "remaining_seats": item["remaining_seats"],
+                            "order_type": "train",
+                        }
+                    )
                     lines.append(
                         f"{item['departure_city']} 到 {item['arrival_city']} {item['departure_time']}: 车次 {item['train_number']}，{item['seat_type']}，票价 {item['price']}元，剩余 {item['remaining_seats']} 张"
                     )
                 else:
+                    tickets.append(
+                        {
+                            "departure_city": item["departure_city"],
+                            "arrival_city": item["arrival_city"],
+                            "departure_time": item["departure_time"],
+                            "arrival_time": item["arrival_time"],
+                            "transport_no": item["flight_number"],
+                            "ticket_type": item["cabin_type"],
+                            "price": item["price"],
+                            "remaining_seats": item["remaining_seats"],
+                            "order_type": "flight",
+                        }
+                    )
                     lines.append(
                         f"{item['departure_city']} 到 {item['arrival_city']} {item['departure_time']}: 航班 {item['flight_number']}，{item['cabin_type']}，票价 {item['price']}元，剩余 {item['remaining_seats']} 张"
                     )
-            return "completed", "\n".join(lines) if lines else "无结果。如果需要其他日期，请补充。"
+            return "completed", "\n".join(lines) if lines else "无结果。如果需要其他日期，请补充。", {
+                "kind": "ticket",
+                "query_type": query_type,
+                "tickets": tickets,
+            }
         if response.get("status") == "no_data":
-            return "input_required", response.get("message", "未找到票务数据，请确认查询条件。")
-        return "failed", response.get("message", "票务查询失败，请稍后重试。")
+            return "input_required", response.get("message", "未找到票务数据，请确认查询条件。"), {
+                "kind": "ticket",
+                "query_type": query_type,
+                "tickets": [],
+            }
+        return "failed", response.get("message", "票务查询失败，请稍后重试。"), {
+            "kind": "ticket",
+            "query_type": query_type,
+            "tickets": [],
+        }
 
     @staticmethod
-    def format_time_response(response: dict) -> tuple[str, str]:
+    def format_time_response(response: dict) -> tuple[str, str, dict]:
         if response.get("status") != "success":
-            return "failed", response.get("message", "时间查询失败，请稍后重试。")
+            return "failed", response.get("message", "时间查询失败，请稍后重试。"), {"kind": "time"}
         data = response.get("data", {})
         text = (
             f"当前时间为 {data.get('current_time', '')}，"
@@ -247,7 +286,7 @@ class TravelDecisionService:
             f"时区 {data.get('timezone', 'Asia/Shanghai')}，"
             f"星期 {data.get('weekday', '')}。"
         )
-        return "completed", text
+        return "completed", text, {"kind": "time", "current_time": data}
 
     async def invoke(self, request: AgentInvokeRequest) -> AgentInvokeResponse:
         request_id = request.request_id or ensure_request_id()
@@ -259,25 +298,40 @@ class TravelDecisionService:
         if kind == "time":
             raw = await call_travel_read_tool("get_current_time", {"timezone_name": "Asia/Shanghai"})
             response = json.loads(raw) if isinstance(raw, str) else raw
-            state, text = self.format_time_response(response)
-            return AgentInvokeResponse(state=state, text=text)
+            state, text, data = self.format_time_response(response)
+            return AgentInvokeResponse(state=state, text=text, data=data, meta={"kind": "time", "tool": "get_current_time"})
 
         if kind == "weather":
             gen_result = self.generate_weather_sql(request.text)
             if gen_result["status"] == "input_required":
-                return AgentInvokeResponse(state="input_required", text=gen_result["message"])
+                return AgentInvokeResponse(state="input_required", text=gen_result["message"], data={"kind": "weather", "weather_days": []}, meta={"kind": "weather"})
             raw = await call_travel_read_tool("query_weather", {"sql": gen_result["sql"]})
             response = json.loads(raw) if isinstance(raw, str) else raw
-            state, text = self.format_weather_response(response)
-            return AgentInvokeResponse(state=state, text=text)
+            state, text, data = self.format_weather_response(response)
+            return AgentInvokeResponse(
+                state=state,
+                text=text,
+                data=data,
+                meta={"kind": "weather", "tool": "query_weather", "sql": gen_result["sql"], "row_count": len(data.get("weather_days", []))},
+            )
 
         gen_result = self.generate_ticket_sql(request.text)
         if gen_result["status"] == "input_required":
-            return AgentInvokeResponse(state="input_required", text=gen_result["message"])
+            return AgentInvokeResponse(
+                state="input_required",
+                text=gen_result["message"],
+                data={"kind": "ticket", "query_type": gen_result.get("type", ""), "tickets": []},
+                meta={"kind": "ticket"},
+            )
         raw = await call_travel_read_tool("query_tickets", {"sql": gen_result["sql"]})
         response = json.loads(raw) if isinstance(raw, str) else raw
-        state, text = self.format_ticket_response(response, gen_result["type"])
-        return AgentInvokeResponse(state=state, text=text)
+        state, text, data = self.format_ticket_response(response, gen_result["type"])
+        return AgentInvokeResponse(
+            state=state,
+            text=text,
+            data=data,
+            meta={"kind": "ticket", "tool": "query_tickets", "sql": gen_result["sql"], "row_count": len(data.get("tickets", []))},
+        )
 
 
 app = FastAPI(title=SERVICE_NAME)

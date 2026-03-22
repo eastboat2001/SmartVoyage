@@ -14,6 +14,8 @@ import pytz
 import uvicorn
 from fastapi import FastAPI
 from langgraph.graph import END, START, StateGraph
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command, interrupt
 from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
@@ -70,9 +72,13 @@ class OrderWorkflowState(TypedDict, total=False):
     missing_fields: list[str]
     pending_order_context: dict[str, Any]
     ticket_result_text: str
+    ticket_result_data: dict[str, Any]
     ticket_task_state: str
     final_text: str
     final_state: Literal["completed", "failed", "input_required"]
+    final_data: dict[str, Any]
+    review_payload: dict[str, Any]
+    review_decision: Literal["approved", "rejected"]
 
 
 def extract_username(conversation: str) -> str:
@@ -146,6 +152,19 @@ def determine_action(query: str, pending_context: dict[str, Any]) -> Literal["qu
     if is_change_query(query):
         return "change_order"
     return "create_order"
+
+
+def is_hitl_review_pending(pending_context: dict[str, Any]) -> bool:
+    return pending_context.get("action") == "hitl_review" and bool(pending_context.get("thread_id"))
+
+
+def parse_review_decision(query: str) -> Literal["approved", "rejected"] | None:
+    normalized = strip_pending_context(query).strip().lower()
+    if normalized in {"yes", "y", "确认", "同意", "通过", "继续", "approve"}:
+        return "approved"
+    if normalized in {"no", "n", "取消", "拒绝", "终止", "reject"}:
+        return "rejected"
+    return None
 
 
 def normalize_missing_fields(action: str, result: OrderOperationExtractionResult) -> list[str]:
@@ -269,6 +288,7 @@ class TransportOrderService:
     def _build_workflow(self):
         workflow = StateGraph(OrderWorkflowState)
         workflow.add_node("prepare", self._prepare_state)
+        workflow.add_node("review", self._review_node)
         workflow.add_node("query_orders", self._query_orders_node)
         workflow.add_node("cancel_order", self._cancel_order_node)
         workflow.add_node("change_order", self._change_order_node)
@@ -282,8 +302,8 @@ class TransportOrderService:
             {
                 "finish": END,
                 "query_orders": "query_orders",
-                "cancel_order": "cancel_order",
-                "change_order": "change_order",
+                "cancel_order": "review",
+                "change_order": "review",
                 "create_order": "lookup_tickets",
             },
         )
@@ -293,10 +313,20 @@ class TransportOrderService:
         workflow.add_conditional_edges(
             "lookup_tickets",
             self._route_after_ticket_lookup,
-            {"create_order": "create_order", "finish": END},
+            {"review": "review", "finish": END},
+        )
+        workflow.add_conditional_edges(
+            "review",
+            self._route_after_review,
+            {
+                "create_order": "create_order",
+                "cancel_order": "cancel_order",
+                "change_order": "change_order",
+                "finish": END,
+            },
         )
         workflow.add_edge("create_order", END)
-        return workflow.compile()
+        return workflow.compile(checkpointer=InMemorySaver())
 
     def _extract_operation_payload(
         self,
@@ -420,34 +450,174 @@ class TransportOrderService:
             }
 
         logger.info(f"余票信息: {ticket_result.text}")
-        return {"ticket_task_state": "completed", "ticket_result_text": ticket_result.text}
+        return {
+            "ticket_task_state": "completed",
+            "ticket_result_text": ticket_result.text,
+            "ticket_result_data": ticket_result.data or {},
+        }
 
     @staticmethod
     def _route_after_ticket_lookup(state: OrderWorkflowState) -> str:
-        return "create_order" if state.get("ticket_task_state") == "completed" else "finish"
+        return "review" if state.get("ticket_task_state") == "completed" else "finish"
+
+    def _build_review_payload(self, state: OrderWorkflowState) -> dict[str, Any]:
+        action = state["action"]
+        if action == "create_order":
+            tickets = state.get("ticket_result_data", {}).get("tickets", [])
+            ticket = tickets[0] if tickets else {}
+            return {
+                "kind": "transport_order_review",
+                "action": action,
+                "username": state["username"],
+                "order_type": ticket.get("order_type", ""),
+                "departure_city": ticket.get("departure_city", ""),
+                "arrival_city": ticket.get("arrival_city", ""),
+                "departure_time": ticket.get("departure_time", ""),
+                "transport_no": ticket.get("transport_no", ""),
+                "ticket_type": ticket.get("ticket_type", ""),
+                "quantity": 1,
+                "price": ticket.get("price", ""),
+                "summary": f"下单审批：{ticket.get('departure_time', '')} {ticket.get('departure_city', '')}到{ticket.get('arrival_city', '')} {ticket.get('transport_no', '')} {ticket.get('ticket_type', '')} 1张。",
+            }
+
+        payload = state.get("operation_payload", {})
+        return {
+            "kind": "transport_order_review",
+            "action": action,
+            "username": state["username"],
+            "order_type": payload.get("order_type", ""),
+            "departure_city": payload.get("departure_city", ""),
+            "arrival_city": payload.get("arrival_city", ""),
+            "departure_date": payload.get("departure_date") or payload.get("current_departure_date", ""),
+            "transport_no": payload.get("transport_no") or payload.get("current_transport_no", ""),
+            "ticket_type": payload.get("ticket_type") or payload.get("current_ticket_type", ""),
+            "new_departure_date": payload.get("new_departure_date", ""),
+            "new_transport_no": payload.get("new_transport_no", ""),
+            "new_ticket_type": payload.get("new_ticket_type", ""),
+            "summary": (
+                f"{'退票' if action == 'cancel_order' else '改签'}审批："
+                f"{payload.get('departure_date') or payload.get('current_departure_date', '')} "
+                f"{payload.get('departure_city', '')}到{payload.get('arrival_city', '')} "
+                f"{payload.get('transport_no') or payload.get('current_transport_no', '')} "
+                f"{payload.get('ticket_type') or payload.get('current_ticket_type', '')}"
+            ),
+        }
+
+    def _review_node(self, state: OrderWorkflowState) -> dict[str, Any]:
+        review_payload = self._build_review_payload(state)
+        decision = interrupt(review_payload)
+        if isinstance(decision, dict):
+            normalized = decision.get("decision", "")
+        else:
+            normalized = decision
+        if normalized == "approved":
+            return {
+                "review_payload": review_payload,
+                "review_decision": "approved",
+            }
+        return {
+            "review_payload": review_payload,
+            "review_decision": "rejected",
+            "final_state": "completed",
+            "final_text": "已取消本次操作，未执行实际下单、退票或改签。",
+            "final_data": {"kind": "transport_order_review", "review_payload": review_payload},
+        }
+
+    @staticmethod
+    def _route_after_review(state: OrderWorkflowState) -> str:
+        if state.get("review_decision") != "approved":
+            return "finish"
+        return state["action"]
 
     async def _create_order_node(self, state: OrderWorkflowState) -> dict[str, Any]:
         username = state["username"]
         conversation = state["conversation"]
         ticket_result = state["ticket_result_text"]
-        order_result = await run_order_agent(f"{conversation}\n当前用户：{username}\n余票信息：{ticket_result}")
+        ticket_data = state.get("ticket_result_data", {})
+        tickets = ticket_data.get("tickets", [])
+        if tickets:
+            selected = tickets[0]
+            order_type = selected.get("order_type", "")
+            transport_label = "高铁票" if order_type == "train" else "机票"
+            transport_field = "车次" if order_type == "train" else "航班"
+            deterministic_query = (
+                f"当前用户：{username}\n"
+                f"请直接预订{str(selected.get('departure_time', ''))[:10]}"
+                f"{selected.get('departure_city', '')}到{selected.get('arrival_city', '')}的{transport_label}，"
+                f"{transport_field}{selected.get('transport_no', '')}，"
+                f"{selected.get('ticket_type', '')}1张。"
+            )
+            order_result = await run_order_agent(deterministic_query)
+        else:
+            order_result = await run_order_agent(f"{conversation}\n当前用户：{username}\n余票信息：{ticket_result}")
         logger.info(f"MCP 返回: {order_result}")
         data = order_result.get("message", "")
         final_state: Literal["completed", "failed", "input_required"] = "completed" if order_result.get("status") == "success" else "failed"
         final_text = "余票信息：" + ticket_result + "\n订票结果：" + data if final_state == "completed" else data
-        return {"final_text": final_text, "final_state": final_state}
+        return {
+            "final_text": final_text,
+            "final_state": final_state,
+            "final_data": {
+                "kind": "transport_order",
+                "ticket_result": ticket_data,
+            },
+        }
 
     async def invoke(self, request: AgentInvokeRequest) -> AgentInvokeResponse:
         request_id = request.request_id or ensure_request_id()
         set_request_id(request_id)
         logger.info(f"[{request_id}] 订单域收到对话: {request.text}")
-        result = await self.workflow.ainvoke({"conversation": request.text})
+        latest_query = latest_user_request(request.text)
+        pending_context = extract_pending_context(latest_query)
+
+        if is_hitl_review_pending(pending_context):
+            decision = parse_review_decision(latest_query)
+            thread_id = pending_context["thread_id"]
+            if not decision:
+                review_payload = pending_context.get("review_payload", {})
+                return AgentInvokeResponse(
+                    state="input_required",
+                    text="这是一个待审批操作。请回复 yes 确认执行，或回复 no 取消执行。",
+                    pending_order_context=pending_context,
+                    data={"kind": "hitl_review", "review_payload": review_payload},
+                    meta={"thread_id": thread_id, "review_required": True},
+                )
+            result = await self.workflow.ainvoke(
+                Command(resume={"decision": decision}),
+                config={"configurable": {"thread_id": thread_id}},
+            )
+        else:
+            thread_id = request_id
+            result = await self.workflow.ainvoke(
+                {"conversation": request.text},
+                config={"configurable": {"thread_id": thread_id}},
+            )
+
+        if "__interrupt__" in result:
+            interrupt_payload = result["__interrupt__"][0].value
+            return AgentInvokeResponse(
+                state="input_required",
+                text=(
+                    f"{interrupt_payload.get('summary', '检测到待审批操作。')}\n"
+                    "请回复 yes 确认执行，或回复 no 取消执行。"
+                ),
+                pending_order_context={
+                    "action": "hitl_review",
+                    "thread_id": thread_id,
+                    "review_payload": interrupt_payload,
+                },
+                data={"kind": "hitl_review", "review_payload": interrupt_payload},
+                meta={"thread_id": thread_id, "review_required": True},
+            )
+
         final_text = result.get("final_text", "订单流程执行失败，请重试。")
         final_state = result.get("final_state", "failed")
         return AgentInvokeResponse(
             state=final_state,
             text=final_text,
             pending_order_context=result.get("pending_order_context", {}),
+            data=result.get("final_data", {}),
+            meta={"kind": "transport_order", "action": result.get("action", ""), "thread_id": thread_id},
         )
 
 

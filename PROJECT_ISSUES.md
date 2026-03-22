@@ -164,22 +164,78 @@
 ### 解决方案
 
 - 当前先补最小 `LangSmith` 基线集
-- 只覆盖无副作用主链路：
+- 使用单一基础数据集，同时覆盖：
   - 时间查询
   - 天气查询
   - 火车票查询
   - 机票查询
   - `transport_decision`
+  - 直接下单
+  - 退票
+  - 改签
 - evaluator 固定检查：
   - intent
   - route
   - response keywords
   - pending context
+  - DB state
 
 ### 结果
 
 - 后续改 orchestrator、prompt、A2A 时，可以更快发现回归
 - 项目开始从“手工调 Demo”转向“有最小自动回归的工程项目”
+
+## 7. 跨服务只传自然语言文本，复杂任务容易变脆
+
+### 问题现象
+
+`transport_decision` 和订单创建链路里，前一层服务经常把结果先写成自然语言，再由后一层服务继续理解。这样虽然容易演示，但一旦文案措辞变化，后续行为就可能漂移。
+
+### 根因
+
+- 服务协议只有 `text`
+- 编排层和订单域都需要从上游文案里再次恢复业务事实
+- 这会把“模型表述变化”错误放大成“执行链路不稳定”
+
+### 解决方案
+
+- 把 A2A 响应协议升级成双通道：
+  - `text`
+  - `data`
+  - `meta`
+- `TravelDecisionAgent` 现在除了返回自然语言结果，还会返回结构化天气 / 时间 / 票务 payload
+- orchestrator 和订单域优先消费结构化 payload，再把自然语言结果留给用户展示
+
+### 结果
+
+- 复杂任务不再主要依赖文案桥接
+- 下单路径更稳定
+- 调试时可以直接看结构化 payload，而不是从自然语言里猜上游到底返回了什么
+
+## 8. 高风险副作用缺少真正暂停点，CLI 下很难做人审
+
+### 问题现象
+
+在接入自动下单、退票、改签后，系统虽然能执行，但高风险动作没有真正的暂停点。即使想做人审，也只能在业务层手写一轮“确认吗”，并不能真正暂停和恢复工作流。
+
+### 根因
+
+- 之前只有 `pending_context`
+- 没有使用 LangGraph 的 checkpoint / interrupt / resume
+- CLI 缺少审批线程概念
+
+### 解决方案
+
+- `TransportOrderAgent` 接入 `InMemorySaver`
+- 在 `create_order / cancel_order / change_order` 之前统一进入 `review` 节点
+- `review` 节点使用 `interrupt(...)` 返回审批 payload
+- CLI 通过 `yes / no` 恢复或取消执行
+
+### 结果
+
+- 命令行下也能做真正的 HITL
+- 工作流不再是假暂停，而是 LangGraph 原生暂停后恢复
+- 当前限制是 checkpoint 仍为进程内存级，服务重启后审批线程会丢失
 
 ## 面试时建议优先讲的 4 个问题
 

@@ -18,6 +18,8 @@ class AgentInvokeResponse(BaseModel):
     state: AgentState
     text: str
     pending_order_context: dict[str, Any] = Field(default_factory=dict)
+    data: dict[str, Any] = Field(default_factory=dict)
+    meta: dict[str, Any] = Field(default_factory=dict)
 
 
 class AgentSkillDescriptor(BaseModel):

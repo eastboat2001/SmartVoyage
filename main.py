@@ -45,6 +45,8 @@ def process_user_input(prompt):
         conversation_history += f"\nAssistant: {response}"  # 更新历史
 
         print(f"\n助手回复：\n{response}\n")
+        if pending_order_context.get("action") == "hitl_review":
+            print("审批模式：请输入 yes 确认执行，或输入 no 取消执行。\n")
         # 添加到消息历史
         messages.append({"role": "assistant", "content": response})
 
