@@ -8,12 +8,9 @@ from pathlib import Path
 
 
 r"""
-只启动 6 个后端服务：
+只启动后端服务：
 
 .\.venv\Scripts\python.exe run_all.py
-
-连 Streamlit 前端一起启动：
-.\.venv\Scripts\python.exe run_all.py --with-ui
 
 连命令行入口一起启动：
 .\.venv\Scripts\python.exe run_all.py --with-cli
@@ -28,15 +25,12 @@ PYTHON = sys.executable
 
 
 SERVICES = [
-    ("mcp-ticket", [PYTHON, "-u", "mcp_server/mcp_ticket_server.py"]),
-    ("mcp-weather", [PYTHON, "-u", "mcp_server/mcp_weather_server.py"]),
+    ("mcp-travel-read", [PYTHON, "-u", "mcp_server/mcp_travel_read_server.py"]),
     ("mcp-order", [PYTHON, "-u", "mcp_server/mcp_order_server.py"]),
-    ("a2a-ticket", [PYTHON, "-u", "a2a_server/ticket_server.py"]),
-    ("a2a-weather", [PYTHON, "-u", "a2a_server/weather_server.py"]),
+    ("a2a-travel-decision", [PYTHON, "-u", "a2a_server/travel_decision_server.py"]),
     ("a2a-order", [PYTHON, "-u", "a2a_server/order_server.py"]),
 ]
 
-UI_SERVICE = ("streamlit", [PYTHON, "-m", "streamlit", "run", "app.py"])
 CLI_SERVICE = ("main-cli", [PYTHON, "main.py"])
 
 def terminate_process(process: subprocess.Popen) -> None:
@@ -115,11 +109,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Start SmartVoyage services.")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
-        "--with-ui",
-        action="store_true",
-        help="Also start the Streamlit frontend.",
-    )
-    mode_group.add_argument(
         "--with-cli",
         action="store_true",
         help="Also start the command-line entrypoint.",
@@ -141,11 +130,6 @@ def main() -> int:
             processes.append((name, process, log_path))
             print(f"[launcher] started {name} -> {log_path.relative_to(ROOT)}")
             time.sleep(args.startup_delay)
-
-        if args.with_ui:
-            process = start_interactive_process(*UI_SERVICE)
-            processes.append((UI_SERVICE[0], process, ROOT / "CONSOLE"))
-            print("[launcher] started streamlit in current terminal")
 
         print("[launcher] all requested processes started, press Ctrl+C to stop")
         print("[launcher] mcp service output -> logs/mcp.log")

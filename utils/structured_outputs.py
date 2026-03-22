@@ -5,14 +5,14 @@ from pydantic import BaseModel, Field, model_validator
 
 SupportedIntent = Literal[
     "weather",
+    "time",
     "flight",
     "train",
     "order",
     "my_orders",
     "cancel_order",
     "change_order",
-    "travel_plan",
-    "attraction",
+    "transport_decision",
     "out_of_scope",
 ]
 
@@ -23,7 +23,7 @@ class IntentRecognitionResult(BaseModel):
     follow_up_message: str = ""
 
 
-class TravelPlanResult(BaseModel):
+class TransportDecisionPlanResult(BaseModel):
     transport_mode: Literal["train", "flight"]
     weather_brief: str = ""
     recommendation_reason: str

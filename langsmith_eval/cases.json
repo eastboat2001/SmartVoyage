@@ -1,0 +1,394 @@
+[
+  {
+    "case_id": "base_001_time_query",
+    "description": "查询当前时间时，应路由到 TravelDecisionAgent 并返回时间信息。",
+    "turns": [
+      "现在几点"
+    ],
+    "reference_output": {
+      "intents": [
+        "time"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "TravelDecisionAgent"
+      ],
+      "response_keywords_all": [
+        "当前时间",
+        "当前日期"
+      ],
+      "response_keywords_any": [
+        "Asia/Shanghai",
+        "星期"
+      ]
+    }
+  },
+  {
+    "case_id": "base_002_weather_query",
+    "description": "查询天气时，应返回城市、日期和天气摘要。",
+    "turns": [
+      "查询2026-03-21杭州的天气"
+    ],
+    "reference_output": {
+      "intents": [
+        "weather"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "TravelDecisionAgent"
+      ],
+      "response_keywords_all": [
+        "杭州",
+        "2026-03-21"
+      ],
+      "response_keywords_any": [
+        "天气预报",
+        "多云",
+        "气温"
+      ]
+    }
+  },
+  {
+    "case_id": "base_003_train_ticket_query",
+    "description": "查询高铁票时，应路由到 TravelDecisionAgent 并返回车次与余票信息。",
+    "turns": [
+      "查询2026-03-21北京到上海的高铁票"
+    ],
+    "reference_output": {
+      "intents": [
+        "train"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "TravelDecisionAgent"
+      ],
+      "response_keywords_all": [
+        "北京",
+        "上海"
+      ],
+      "response_keywords_any": [
+        "G5",
+        "二等座",
+        "剩余"
+      ]
+    }
+  },
+  {
+    "case_id": "base_004_flight_ticket_query",
+    "description": "查询机票时，应返回航班或舱位信息。",
+    "turns": [
+      "查询2026-03-21北京到上海的机票"
+    ],
+    "reference_output": {
+      "intents": [
+        "flight"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "TravelDecisionAgent"
+      ],
+      "response_keywords_all": [
+        "北京",
+        "上海"
+      ],
+      "response_keywords_any": [
+        "航班",
+        "经济舱",
+        "票价"
+      ]
+    }
+  },
+  {
+    "case_id": "base_005_transport_decision_read_only",
+    "description": "交通决策在显式要求不要下单时，应只走建议链路，不进入订单服务。",
+    "turns": [
+      "根据2026-03-21上海的天气，帮我判断从北京去上海坐高铁还是飞机更合适，不要下单"
+    ],
+    "reference_output": {
+      "intents": [
+        "transport_decision"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "TravelDecisionAgent"
+      ],
+      "response_keywords_all": [
+        "天气判断",
+        "出行建议",
+        "票务结果"
+      ],
+      "response_keywords_any": [
+        "高铁",
+        "火车",
+        "飞机"
+      ]
+    }
+  },
+  {
+    "case_id": "base_006_create_train_order",
+    "description": "直接预订高铁票时，应创建订单并扣减库存。",
+    "turns": [
+      "当前用户：demo_user\n帮我预订2026-03-21北京到上海的高铁票，二等座1张"
+    ],
+    "side_effect": true,
+    "setup_profile": "baseline",
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "booked_train_g5_order_count",
+          "table": "orders",
+          "filter": {
+            "order_type": "train",
+            "status": "booked",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座"
+          },
+          "delta": 1
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "g5_second_class_inventory_sum",
+          "table": "train_tickets",
+          "field": "remaining_seats",
+          "filter": {
+            "train_number": "G5",
+            "seat_type": "二等座",
+            "departure_time": {
+              "op": "startswith",
+              "value": "2026-03-21"
+            }
+          },
+          "delta": -1
+        }
+      ]
+    },
+    "reference_output": {
+      "intents": [
+        "order"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "TransportOrderAgent"
+      ],
+      "response_keywords_all": [
+        "订单号",
+        "G5"
+      ],
+      "response_keywords_any": [
+        "预订成功",
+        "成功预订",
+        "二等座"
+      ]
+    }
+  },
+  {
+    "case_id": "base_007_cancel_train_order",
+    "description": "退票时，应取消已存在订单并回补库存。",
+    "turns": [
+      "当前用户：demo_user\n帮我退掉2026-03-21北京到上海的高铁票"
+    ],
+    "side_effect": true,
+    "setup_profile": "seed_train_order",
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "booked_train_g5_order_count",
+          "table": "orders",
+          "filter": {
+            "order_type": "train",
+            "status": "booked",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座"
+          },
+          "delta": -1
+        },
+        {
+          "label": "cancelled_train_g5_order_count",
+          "table": "orders",
+          "filter": {
+            "order_type": "train",
+            "status": "cancelled",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座"
+          },
+          "delta": 1
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "g5_second_class_inventory_sum",
+          "table": "train_tickets",
+          "field": "remaining_seats",
+          "filter": {
+            "train_number": "G5",
+            "seat_type": "二等座",
+            "departure_time": {
+              "op": "startswith",
+              "value": "2026-03-21"
+            }
+          },
+          "delta": 1
+        }
+      ]
+    },
+    "reference_output": {
+      "intents": [
+        "cancel_order"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "TransportOrderAgent"
+      ],
+      "response_keywords_all": [
+        "退票成功"
+      ],
+      "response_keywords_any": [
+        "G5",
+        "二等座"
+      ]
+    }
+  },
+  {
+    "case_id": "base_008_change_train_order",
+    "description": "改签时，应将旧订单标记 changed、新增新订单，并同步调整库存。",
+    "turns": [
+      "当前用户：demo_user\n把我2026-03-21北京到上海的高铁票改签到2026-03-22二等座"
+    ],
+    "side_effect": true,
+    "setup_profile": "seed_train_order",
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "changed_train_g5_order_count",
+          "table": "orders",
+          "filter": {
+            "order_type": "train",
+            "status": "changed",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座"
+          },
+          "delta": 1
+        },
+        {
+          "label": "booked_train_g13_order_count",
+          "table": "orders",
+          "filter": {
+            "order_type": "train",
+            "status": "booked",
+            "transport_no": "G13",
+            "ticket_or_room_type": "二等座"
+          },
+          "delta": 1
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "g5_second_class_inventory_sum",
+          "table": "train_tickets",
+          "field": "remaining_seats",
+          "filter": {
+            "train_number": "G5",
+            "seat_type": "二等座",
+            "departure_time": {
+              "op": "startswith",
+              "value": "2026-03-21"
+            }
+          },
+          "delta": 1
+        },
+        {
+          "label": "g13_second_class_inventory_sum",
+          "table": "train_tickets",
+          "field": "remaining_seats",
+          "filter": {
+            "train_number": "G13",
+            "seat_type": "二等座",
+            "departure_time": {
+              "op": "startswith",
+              "value": "2026-03-22"
+            }
+          },
+          "delta": -1
+        }
+      ]
+    },
+    "reference_output": {
+      "intents": [
+        "change_order"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "TransportOrderAgent"
+      ],
+      "response_keywords_all": [
+        "改签成功"
+      ],
+      "response_keywords_any": [
+        "G13",
+        "新订单"
+      ]
+    }
+  },
+  {
+    "case_id": "base_009_transport_decision_auto_order",
+    "description": "transport_decision 在明确要求有合适票就直接订时，应真正创建订单。",
+    "turns": [
+      "根据2026-03-21上海的天气，帮我判断从北京去上海坐高铁还是飞机更合适，如果有合适票就直接帮我订一张"
+    ],
+    "side_effect": true,
+    "setup_profile": "baseline",
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "booked_train_g5_order_count",
+          "table": "orders",
+          "filter": {
+            "order_type": "train",
+            "status": "booked",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座"
+          },
+          "delta": 1
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "g5_second_class_inventory_sum",
+          "table": "train_tickets",
+          "field": "remaining_seats",
+          "filter": {
+            "train_number": "G5",
+            "seat_type": "二等座",
+            "departure_time": {
+              "op": "startswith",
+              "value": "2026-03-21"
+            }
+          },
+          "delta": -1
+        }
+      ]
+    },
+    "reference_output": {
+      "intents": [
+        "transport_decision"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "TravelDecisionAgent",
+        "TransportOrderAgent"
+      ],
+      "response_keywords_all": [
+        "天气判断",
+        "出行建议",
+        "票务结果",
+        "预订结果"
+      ],
+      "response_keywords_any": [
+        "订单号",
+        "订单已成功创建",
+        "预订成功"
+      ]
+    }
+  }
+]

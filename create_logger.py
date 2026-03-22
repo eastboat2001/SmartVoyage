@@ -2,6 +2,13 @@ import logging
 import os
 
 from config import Config
+from utils.request_context import get_request_id
+
+
+class RequestIdFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = get_request_id() or "-"
+        return True
 
 
 def setup_logger(name, log_file='logs/app.log'):
@@ -15,7 +22,7 @@ def setup_logger(name, log_file='logs/app.log'):
     logger.propagate = False
 
     # 定义日志格式
-    formatter = logging.Formatter('%(name)s - %(asctime)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter('%(name)s - %(asctime)s - %(levelname)s - [%(request_id)s] %(message)s')
 
     # 创建控制台处理器
     console_handler = logging.StreamHandler()
@@ -29,6 +36,9 @@ def setup_logger(name, log_file='logs/app.log'):
 
     # 将处理器添加到日志记录器中
     if not logger.handlers:  # 先进行判断，再进行添加。避免重复添加处理器
+        request_id_filter = RequestIdFilter()
+        console_handler.addFilter(request_id_filter)
+        file_handler.addFilter(request_id_filter)
         logger.addHandler(console_handler)
         logger.addHandler(file_handler)
 
