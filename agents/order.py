@@ -1,16 +1,11 @@
 """
-order_server.py：FastAPI 订单服务，负责交通票务下单、查询我的订单、退票与改签。
+order.py：本地订单子代理，负责交通票务下单、查询我的订单、退票与改签。
 """
 import asyncio
 import json
-import os
 import re
-import sys
 from typing import Any
 
-import httpx
-import uvicorn
-from fastapi import FastAPI
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 from langchain_mcp_adapters.tools import load_mcp_tools
@@ -18,23 +13,16 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from typing_extensions import Literal, TypedDict
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from config import Config
 from create_logger import logger
+from utils.agent_protocol import LocalAgentRequest, LocalAgentResponse
+from utils.error_utils import format_exception_details
 from main_prompts import SmartVoyagePrompts
-from utils.fastapi_middleware import install_common_middleware
 from utils.model_factory import build_order_agent, extract_text_from_agent_result
 from utils.order_action_context import extract_order_action, strip_order_action
 from utils.persistent_checkpointer import PersistentInMemorySaver
-from utils.request_context import clear_request_id, ensure_request_id, set_request_id
+from utils.request_context import ensure_request_id, set_request_id
 from utils.resilient_llm import ResilientModelInvoker
-from utils.service_protocol import (
-    AgentInvokeRequest,
-    AgentInvokeResponse,
-    AgentMetadataResponse,
-    AgentSkillDescriptor,
-)
 from utils.structured_outputs import DateResolutionResult, OrderActionDecisionResult, OrderOperationExtractionResult, ReviewDecisionResult
 from utils.time_utils import get_current_date_str
 from utils.travel_read_context import with_travel_read_kind
@@ -43,21 +31,19 @@ from utils.travel_read_context import with_travel_read_kind
 conf = Config()
 model_invoker = ResilientModelInvoker(conf)
 
-SERVICE_NAME = "TransportOrderAgent"
-SERVICE_URL = "http://localhost:5007"
-SERVICE_VERSION = "2.0.0"
-SERVICE_DESCRIPTION = "负责交通订单创建、查询、退票与改签的订单生命周期助手"
-SERVICE_SKILLS = [
-    AgentSkillDescriptor(
-        name="transport-order",
-        description="根据客户端提供的输入执行票务预定、查询当前用户订单、退票或改签，返回执行结果",
-        examples=[
+AGENT_NAME = "OrderSubagent"
+AGENT_DESCRIPTION = "负责交通订单创建、查询、退票与改签的订单生命周期子代理"
+AGENT_SKILLS = [
+    {
+        "name": "transport-order",
+        "description": "根据客户端提供的输入执行票务预定、查询当前用户订单、退票或改签，返回执行结果",
+        "examples": [
             "当前用户：demo_user\n帮我预订2026-03-21北京到上海的高铁票，二等座1张",
             "当前用户：demo_user\n查询我的订单",
             "当前用户：demo_user\n帮我退掉2026-03-21北京到上海的高铁票",
             "当前用户：demo_user\n把我2026-03-21北京到上海的高铁票改签到2026-03-22二等座",
         ],
-    )
+    }
 ]
 
 
@@ -99,7 +85,7 @@ def extract_username(conversation: str) -> str:
 def extract_departure_date(conversation: str) -> str:
     query = latest_user_request(conversation)
     result = model_invoker.invoke_structured(
-        SmartVoyagePrompts.date_resolution_prompt(),
+        SmartVoyagePrompts.date_resolution_prompt(query=query),
         DateResolutionResult,
         {
             "current_date": get_current_date_str(conf),
@@ -157,7 +143,7 @@ def classify_order_action(
         return explicit_action
 
     result = model_invoker.invoke_structured(
-        SmartVoyagePrompts.order_action_prompt(),
+        SmartVoyagePrompts.order_action_prompt(pending_context=pending_context_summary(pending_context)),
         OrderActionDecisionResult,
         {
             "pending_context": pending_context_summary(pending_context),
@@ -265,8 +251,9 @@ async def run_order_agent(query: str):
                 )
                 return {"status": "success", "message": extract_text_from_agent_result(response)}
     except Exception as exc:
-        logger.error(f"订单 MCP 调用出错：{exc}")
-        return {"status": "error", "message": f"订单 MCP 调用出错：{exc}"}
+        error_detail = format_exception_details(exc)
+        logger.error(f"订单 MCP 调用出错：{error_detail}")
+        return {"status": "error", "message": f"订单 MCP 调用出错：{error_detail}"}
 
 
 async def query_my_orders(username: str, departure_date: str):
@@ -280,8 +267,9 @@ async def query_my_orders(username: str, departure_date: str):
                 result = await session.call_tool("query_user_orders", params)
                 return result if isinstance(result, str) else result.content[0].text
     except Exception as exc:
-        logger.error(f"查询订单失败: {exc}")
-        return f"查询订单失败：{exc}"
+        error_detail = format_exception_details(exc)
+        logger.error(f"查询订单失败: {error_detail}")
+        return f"查询订单失败：{error_detail}"
 
 
 async def invoke_order_tool(tool_name: str, params: dict[str, Any]) -> str:
@@ -292,24 +280,21 @@ async def invoke_order_tool(tool_name: str, params: dict[str, Any]) -> str:
                 result = await session.call_tool(tool_name, params)
                 return result if isinstance(result, str) else result.content[0].text
     except Exception as exc:
-        logger.error(f"调用订单工具失败: tool={tool_name}, error={exc}")
-        return f"调用订单工具失败：{exc}"
+        error_detail = format_exception_details(exc)
+        logger.error(f"调用订单工具失败: tool={tool_name}, error={error_detail}")
+        return f"调用订单工具失败：{error_detail}"
 
 
-async def invoke_travel_decision_agent(conversation: str, request_id: str, now_override: str = "") -> AgentInvokeResponse:
-    async with httpx.AsyncClient(timeout=conf.agent_timeout_seconds) as client:
-        response = await client.post(
-            "http://localhost:5005/invoke",
-            json=AgentInvokeRequest(text=conversation, request_id=request_id, now_override=now_override).model_dump(),
-            headers={"x-request-id": request_id},
-        )
-        response.raise_for_status()
-        return AgentInvokeResponse.model_validate(response.json())
-
-
-class TransportOrderService:
-    def __init__(self):
-        self.checkpointer = PersistentInMemorySaver(conf.order_checkpoint_path)
+class OrderSubagent:
+    def __init__(self, config: Config, travel_read_agent):
+        self.config = config
+        self.travel_read_agent = travel_read_agent
+        self.checkpointer = PersistentInMemorySaver(config.order_checkpoint_path)
+        self.metadata = {
+            "name": AGENT_NAME,
+            "description": AGENT_DESCRIPTION,
+            "skills": AGENT_SKILLS,
+        }
         self.workflow = self._build_workflow()
 
     def _build_workflow(self):
@@ -365,7 +350,7 @@ class TransportOrderService:
     ) -> tuple[dict[str, str], list[str], str, dict[str, Any] | None]:
         current_date = get_current_date_str(conf)
         extraction = model_invoker.invoke_structured(
-            SmartVoyagePrompts.order_operation_extraction_prompt(),
+            SmartVoyagePrompts.order_operation_extraction_prompt(action=action, pending_context=pending_context_summary(pending_context)),
             OrderOperationExtractionResult,
             {
                 "conversation_history": summarize_conversation(conversation),
@@ -471,10 +456,12 @@ class TransportOrderService:
     async def _lookup_tickets_node(self, state: OrderWorkflowState) -> dict[str, Any]:
         conversation = with_travel_read_kind(state["conversation"], "ticket")
         request_id = ensure_request_id()
-        ticket_result = await invoke_travel_decision_agent(
-            conversation,
-            request_id,
-            state.get("now_override", ""),
+        ticket_result = self.travel_read_agent.invoke(
+            LocalAgentRequest(
+                text=conversation,
+                request_id=request_id,
+                now_override=state.get("now_override", ""),
+            )
         )
         if ticket_result.state != "completed":
             logger.info(f"余票未查到：{ticket_result.text}")
@@ -601,7 +588,7 @@ class TransportOrderService:
             },
         }
 
-    async def invoke(self, request: AgentInvokeRequest) -> AgentInvokeResponse:
+    async def ainvoke(self, request: LocalAgentRequest) -> LocalAgentResponse:
         request_id = request.request_id or ensure_request_id()
         set_request_id(request_id)
         logger.info(f"[{request_id}] 订单域收到对话: {request.text}")
@@ -613,7 +600,7 @@ class TransportOrderService:
             review_payload = pending_context.get("review_payload", {})
             decision, follow_up_message = parse_review_decision(latest_query, review_payload)
             if not decision:
-                return AgentInvokeResponse(
+                return LocalAgentResponse(
                     state="input_required",
                     text=follow_up_message,
                     pending_order_context=pending_context,
@@ -633,7 +620,7 @@ class TransportOrderService:
 
         if "__interrupt__" in result:
             interrupt_payload = result["__interrupt__"][0].value
-            return AgentInvokeResponse(
+            return LocalAgentResponse(
                 state="input_required",
                 text=(
                     f"{interrupt_payload.get('summary', '检测到待审批操作。')}\n"
@@ -651,7 +638,7 @@ class TransportOrderService:
 
         final_text = result.get("final_text", "订单流程执行失败，请重试。")
         final_state = result.get("final_state", "failed")
-        return AgentInvokeResponse(
+        return LocalAgentResponse(
             state=final_state,
             text=final_text,
             pending_order_context=result.get("pending_order_context", {}),
@@ -659,35 +646,14 @@ class TransportOrderService:
             meta={"kind": "transport_order", "action": result.get("action", ""), "thread_id": thread_id},
         )
 
-
-app = FastAPI(title=SERVICE_NAME)
-install_common_middleware(app)
-service = TransportOrderService()
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": SERVICE_NAME}
-
-
-@app.get("/metadata", response_model=AgentMetadataResponse)
-async def metadata():
-    return AgentMetadataResponse(
-        name=SERVICE_NAME,
-        description=SERVICE_DESCRIPTION,
-        version=SERVICE_VERSION,
-        url=SERVICE_URL,
-        skills=SERVICE_SKILLS,
-    )
+    def invoke(self, request: LocalAgentRequest) -> LocalAgentResponse:
+        try:
+            return asyncio.run(self.ainvoke(request))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(self.ainvoke(request))
+            finally:
+                loop.close()
 
 
-@app.post("/invoke", response_model=AgentInvokeResponse)
-async def invoke(request: AgentInvokeRequest):
-    try:
-        return await service.invoke(request)
-    finally:
-        clear_request_id()
-
-
-if __name__ == "__main__":
-    uvicorn.run("a2a_server.order_server:app", host="127.0.0.1", port=5007, reload=False)

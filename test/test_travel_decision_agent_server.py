@@ -1,47 +1,54 @@
+import json
 import os
 import sys
-
-import httpx
+import unittest
+from unittest.mock import AsyncMock, patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from create_logger import logger
+from agents.travel_read import TravelReadSubagent
+from config import Config
+from utils.agent_protocol import LocalAgentRequest
 
 
-def main():
-    base_url = "http://localhost:5005"
+class TravelReadSubagentSmokeTest(unittest.TestCase):
+    @patch("agents.travel_read.call_travel_read_tool", new_callable=AsyncMock)
+    @patch.object(TravelReadSubagent, "infer_kind", return_value="time")
+    def test_time_query_returns_completed_response(self, _mock_infer_kind, mock_call_tool):
+        mock_call_tool.return_value = json.dumps(
+            {
+                "status": "success",
+                "data": {
+                    "current_time": "2026-03-21 10:00:00",
+                    "current_date": "2026-03-21",
+                    "timezone": "Asia/Shanghai",
+                    "weekday": "Saturday",
+                },
+            }
+        )
 
-    try:
-        metadata = httpx.get(f"{base_url}/metadata", timeout=10).json()
-        logger.info("获取 TravelDecisionAgent 信息")
-        logger.info(f"名称: {metadata['name']}")
-        logger.info(f"描述: {metadata['description']}")
-        logger.info(f"版本: {metadata['version']}")
-        if metadata.get("skills"):
-            logger.info("支持技能:")
-            for skill in metadata["skills"]:
-                logger.info(f"- {skill['name']}: {skill['description']}")
-                if skill.get("examples"):
-                    logger.info(f"  示例: {', '.join(skill['examples'])}")
-    except Exception as exc:
-        logger.error(f"无法获取 TravelDecisionAgent 信息: {exc}")
+        agent = TravelReadSubagent(Config())
+        response = agent.invoke(LocalAgentRequest(text="现在几点"))
 
-    while True:
-        user_input = input("输入您的查询（天气/时间/票务，输入 'exit' 退出）：").strip()
-        if user_input.lower() == "exit":
-            break
-        if not user_input:
-            continue
+        self.assertEqual(response.state, "completed")
+        self.assertIn("当前时间为 2026-03-21 10:00:00", response.text)
+        self.assertEqual(response.meta["kind"], "time")
+        self.assertEqual(response.meta["tool"], "get_current_time")
 
-        try:
-            response = httpx.post(f"{base_url}/invoke", json={"text": user_input}, timeout=30)
-            response.raise_for_status()
-            payload = response.json()
-            print(payload["text"])
-        except Exception as exc:
-            logger.error(f"查询失败: {exc}")
+    @patch.object(TravelReadSubagent, "infer_kind", return_value="weather")
+    @patch.object(
+        TravelReadSubagent,
+        "generate_weather_plan",
+        return_value={"status": "input_required", "message": "请补充要查询的城市和日期。"},
+    )
+    def test_weather_query_returns_input_required_when_plan_is_incomplete(self, _mock_plan, _mock_infer_kind):
+        agent = TravelReadSubagent(Config())
+        response = agent.invoke(LocalAgentRequest(text="帮我查天气"))
+
+        self.assertEqual(response.state, "input_required")
+        self.assertEqual(response.text, "请补充要查询的城市和日期。")
+        self.assertEqual(response.data["kind"], "weather")
 
 
 if __name__ == "__main__":
-    print("TravelDecisionAgent 查询客户端测试脚本")
-    main()
+    unittest.main()

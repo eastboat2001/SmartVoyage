@@ -1,0 +1,3 @@
+- 当用户在问“高铁还是飞机更合适”“结合天气给建议”“再帮我查票或订票”时，优先从复杂规划意图理解，而不是拆成多个孤立只读意图。
+- 对 `transport_decision`，优先让 `user_queries['transport_decision']` 成为一个可直接用于规划的完整请求。
+- 如果规划链路需要天气读取，再单独补充 `user_queries['weather']`。

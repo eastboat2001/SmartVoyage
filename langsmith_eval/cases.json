@@ -1,7 +1,7 @@
 [
   {
     "case_id": "base_001_time_query_now",
-    "description": "查询当前时间时，应路由到 TravelDecisionAgent 并返回时间与日期信息。",
+    "description": "查询当前时间时，应路由到 TravelReadSubagent 并返回时间与日期信息。",
     "turns": [
       "现在几点"
     ],
@@ -11,7 +11,7 @@
       ],
       "pending_empty": true,
       "routed_agents_any": [
-        "TravelDecisionAgent"
+        "TravelReadSubagent"
       ],
       "response_keywords_all": [
         "当前时间",
@@ -35,7 +35,7 @@
       ],
       "pending_empty": true,
       "routed_agents_any": [
-        "TravelDecisionAgent"
+        "TravelReadSubagent"
       ],
       "response_keywords_all": [
         "当前日期"
@@ -58,7 +58,7 @@
       ],
       "pending_empty": true,
       "routed_agents_any": [
-        "TravelDecisionAgent"
+        "TravelReadSubagent"
       ],
       "response_keywords_all": [
         "杭州",
@@ -83,7 +83,7 @@
       ],
       "pending_empty": true,
       "routed_agents_any": [
-        "TravelDecisionAgent"
+        "TravelReadSubagent"
       ],
       "response_keywords_all": [
         "杭州"
@@ -107,7 +107,7 @@
       ],
       "pending_empty": true,
       "routed_agents_any": [
-        "TravelDecisionAgent"
+        "TravelReadSubagent"
       ],
       "response_keywords_all": [
         "北京",
@@ -132,7 +132,7 @@
       ],
       "pending_empty": true,
       "routed_agents_any": [
-        "TravelDecisionAgent"
+        "TravelReadSubagent"
       ],
       "response_keywords_all": [
         "G5"
@@ -156,7 +156,7 @@
       ],
       "pending_empty": true,
       "routed_agents_any": [
-        "TravelDecisionAgent"
+        "TravelReadSubagent"
       ],
       "response_keywords_all": [
         "北京",
@@ -181,7 +181,7 @@
       ],
       "pending_empty": true,
       "routed_agents_any": [
-        "TravelDecisionAgent"
+        "TravelReadSubagent"
       ],
       "response_keywords_all": [
         "CA1509"
@@ -205,7 +205,7 @@
       ],
       "pending_empty": true,
       "routed_agents_any": [
-        "TravelDecisionAgent"
+        "TravelReadSubagent"
       ],
       "response_keywords_all": [
         "天气判断",
@@ -232,7 +232,7 @@
       ],
       "pending_empty": true,
       "routed_agents_any": [
-        "TravelDecisionAgent"
+        "TravelReadSubagent"
       ],
       "response_keywords_all": [
         "杭州",
@@ -258,7 +258,7 @@
       ],
       "pending_empty": true,
       "routed_agents_any": [
-        "TravelDecisionAgent"
+        "TravelReadSubagent"
       ],
       "response_keywords_all": [
         "北京",
@@ -284,7 +284,7 @@
       ],
       "pending_empty": true,
       "routed_agents_any": [
-        "TravelDecisionAgent"
+        "TravelReadSubagent"
       ],
       "response_keywords_all": [
         "北京",
@@ -310,7 +310,7 @@
       ],
       "pending_empty": true,
       "routed_agents_any": [
-        "TravelDecisionAgent"
+        "TravelReadSubagent"
       ],
       "response_keywords_all": [
         "天气判断",
@@ -336,7 +336,7 @@
       ],
       "pending_empty": true,
       "routed_agents_any": [
-        "TransportOrderAgent"
+        "OrderSubagent"
       ],
       "response_keywords_all": [
         "demo_user",
@@ -357,7 +357,7 @@
       ],
       "pending_empty": true,
       "routed_agents_any": [
-        "TransportOrderAgent"
+        "OrderSubagent"
       ],
       "response_keywords_all": [
         "demo_user",
@@ -379,7 +379,7 @@
       ],
       "pending_empty": true,
       "routed_agents_any": [
-        "TransportOrderAgent"
+        "OrderSubagent"
       ],
       "response_keywords_all": [
         "demo_user",
@@ -390,7 +390,7 @@
   },
   {
     "case_id": "base_017_cancel_order_follow_up",
-    "description": "退票信息不足时，应直接追问缺失信息，而不是误判成其他动作或继续执行。",
+    "description": "退票信息不足时，应直接追问缺失信息，并保留 pending context 以等待用户补充。",
     "turns": [
       "帮我退票"
     ],
@@ -398,7 +398,7 @@
       "intents": [
         "cancel_order"
       ],
-      "pending_empty": true,
+      "pending_empty": false,
       "routed_agents_any": [],
       "response_keywords_all": [
         "请"
@@ -414,7 +414,7 @@
   },
   {
     "case_id": "base_018_change_order_follow_up",
-    "description": "改签信息不足时，应直接追问缺失信息，而不是误判成其他动作或继续执行。",
+    "description": "改签信息不足时，应直接追问缺失信息，并保留 pending context 以等待用户补充。",
     "turns": [
       "帮我改签高铁票"
     ],
@@ -422,7 +422,7 @@
       "intents": [
         "change_order"
       ],
-      "pending_empty": true,
+      "pending_empty": false,
       "routed_agents_any": [],
       "response_keywords_all": [
         "请提供"
@@ -446,7 +446,7 @@
       ],
       "pending_empty": true,
       "routed_agents_any": [
-        "TransportOrderAgent"
+        "OrderSubagent"
       ],
       "response_keywords_all": [
         "demo_user",

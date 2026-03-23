@@ -1,6 +1,6 @@
 from config import Config
 from create_logger import logger
-from utils.orchestrator import SmartVoyageOrchestrator
+from agents.supervisor import SmartVoyageSupervisor
 
 conf = Config()
 
@@ -8,18 +8,18 @@ conf = Config()
 messages = []  # 存储对话历史消息列表，每个元素为字典{"role": "user/assistant", "content": "消息内容"}
 agent_metadata = {}
 conversation_history = ""  # 存储整个对话历史字符串，用于意图识别
-orchestrator = None
+supervisor = None
 pending_order_context = {}
 
 
-# 初始化 orchestrator 与 CLI 所需的会话状态
+# 初始化 supervisor 与 CLI 所需的会话状态
 def initialize_system():
     """
-    初始化系统组件，包括 orchestrator、代理元信息和会话状态。
+    初始化系统组件，包括 supervisor、代理元信息和会话状态。
     """
-    global agent_metadata, conversation_history, orchestrator, pending_order_context
-    orchestrator = SmartVoyageOrchestrator(conf)
-    agent_metadata = orchestrator.agent_metadata
+    global agent_metadata, conversation_history, supervisor, pending_order_context
+    supervisor = SmartVoyageSupervisor(conf)
+    agent_metadata = supervisor.agent_metadata
 
     # 初始化对话历史为空字符串
     conversation_history = ""
@@ -30,14 +30,14 @@ def process_user_input(prompt):
     """
     处理用户输入：识别意图、调用代理、生成响应。
     """
-    global messages, conversation_history, orchestrator, pending_order_context
+    global messages, conversation_history, supervisor, pending_order_context
     # 添加用户消息到历史
     messages.append({"role": "user", "content": prompt})
     conversation_history += f"\nUser: {prompt}"
 
     print("正在分析您的意图...")
     try:
-        result = orchestrator.process_user_input(prompt, conversation_history, pending_order_context)
+        result = supervisor.process_user_input(prompt, conversation_history, pending_order_context)
         response = result["response"]
         pending_order_context = result.get("pending_order_context", {})
         if result["routed_agents"]:
@@ -60,20 +60,19 @@ def process_user_input(prompt):
 # 显示代理卡片信息
 def display_agent_cards():
     """
-    显示所有代理的卡片信息，包括技能、描述、地址和状态。
+    显示所有子代理的卡片信息，包括技能、描述和状态。
     """
-    print("\n🛠️ Agent Cards:")
+    print("\n🛠️ Subagent Cards:")
     for agent_name, metadata in agent_metadata.items():
-        print(f"\n--- Agent: {agent_name} ---")
+        print(f"\n--- Subagent: {agent_name} ---")
         print(f"技能: {metadata.get('skills', [])}")
         print(f"描述: {metadata.get('description', '')}")
-        print(f"地址: {metadata.get('url', '未知地址')}")
         print(f"状态: 在线")  # 固定状态为在线
 
 if __name__ == "__main__":
     initialize_system()
-    print("🤖 基于A2A的SmartVoyage旅行智能助手")
-    print("欢迎体验智能对话！输入问题，按回车提交；输入'quit'退出；输入'cards'查看代理卡片。")
+    print("🤖 基于 Supervisor + MCP + Skill Runtime 的 SmartVoyage 旅行智能助手")
+    print("欢迎体验智能对话！输入问题，按回车提交；输入'quit'退出；输入'cards'查看子代理卡片。")
     print(f"当前演示用户：{conf.default_username}")
 
     # 显示初始代理卡片
@@ -93,4 +92,4 @@ if __name__ == "__main__":
             process_user_input(prompt)
 
     print("\n---")
-    print("Powered by 黑马程序员 | 基于Agent2Agent的旅行助手系统 v2.0")
+    print("Powered by 黑马程序员 | 基于 Supervisor-style Multi-Agent 的旅行助手系统 v3.0")

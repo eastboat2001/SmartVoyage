@@ -1,47 +1,118 @@
 import asyncio
 import json
 import os
+import subprocess
 import sys
+import time
+import unittest
+from pathlib import Path
 
-from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+ROOT = Path(__file__).resolve().parents[1]
+SERVER_URL = "http://127.0.0.1:8001/mcp"
 
 
-server_url = "http://127.0.0.1:8001/mcp"
+def _unwrap(result):
+    if hasattr(result, "content") and result.content:
+        texts = []
+        for item in result.content:
+            text = getattr(item, "text", None)
+            if text is not None:
+                texts.append(text)
+        if len(texts) == 1:
+            try:
+                parsed = json.loads(texts[0])
+                if isinstance(parsed, dict) and isinstance(parsed.get("result"), str):
+                    try:
+                        parsed["result"] = json.loads(parsed["result"])
+                    except Exception:
+                        pass
+                return parsed
+            except Exception:
+                return texts[0]
+        return texts
+    return str(result)
 
 
-async def test_travel_read_mcp():
-    try:
-        async with streamablehttp_client(server_url) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                try:
+class TravelReadMCPIntegrationTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
+        cls.process = subprocess.Popen(
+            [sys.executable, "-u", "mcp_server/mcp_travel_read_server.py"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(3)
+
+    @classmethod
+    def tearDownClass(cls):
+        if getattr(cls, "process", None) and cls.process.poll() is None:
+            cls.process.terminate()
+            try:
+                cls.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                cls.process.kill()
+                cls.process.wait(timeout=5)
+
+    def test_travel_read_tools_return_expected_data(self):
+        async def _run():
+            async with streamablehttp_client(SERVER_URL) as (read, write, _):
+                async with ClientSession(read, write) as session:
                     await session.initialize()
-                    print("会话初始化成功，可以开始调用工具。")
-                    tools = await load_mcp_tools(session)
-                    print(f"tools-->{tools}")
 
-                    weather_sql = "SELECT city, fx_date, temp_max, temp_min, text_day, text_night, humidity, wind_dir_day, precip FROM weather_data WHERE city = '北京' AND fx_date = '2026-03-21'"
-                    weather_result = await session.call_tool("query_weather", {"sql": weather_sql})
-                    weather_data = json.loads(weather_result) if isinstance(weather_result, str) else weather_result
-                    print(f"天气查询结果：{weather_data}")
+                    time_result = _unwrap(
+                        await session.call_tool(
+                            "get_current_time",
+                            {
+                                "timezone_name": "Asia/Shanghai",
+                                "now_override": "2026-03-21T09:00:00+08:00",
+                            },
+                        )
+                    )
+                    weather_result = _unwrap(
+                        await session.call_tool(
+                            "query_weather",
+                            {
+                                "sql": (
+                                    "SELECT city, fx_date, temp_max, temp_min, text_day, text_night, "
+                                    "humidity, wind_dir_day, precip "
+                                    "FROM weather_data WHERE city = '北京' AND fx_date = '2026-03-21'"
+                                )
+                            },
+                        )
+                    )
+                    ticket_result = _unwrap(
+                        await session.call_tool(
+                            "query_tickets",
+                            {
+                                "sql": (
+                                    "SELECT departure_city, arrival_city, departure_time, train_number, seat_type, "
+                                    "price, remaining_seats "
+                                    "FROM train_tickets WHERE departure_city = '北京' AND arrival_city = '上海' "
+                                    "AND DATE(departure_time) = '2026-03-21' AND seat_type = '二等座'"
+                                )
+                            },
+                        )
+                    )
+                    return time_result, weather_result, ticket_result
 
-                    ticket_sql = "SELECT departure_city, arrival_city, departure_time, train_number, seat_type, price, remaining_seats FROM train_tickets WHERE departure_city = '北京' AND arrival_city = '上海' AND DATE(departure_time) = '2026-03-21' AND seat_type = '二等座'"
-                    ticket_result = await session.call_tool("query_tickets", {"sql": ticket_sql})
-                    ticket_data = json.loads(ticket_result) if isinstance(ticket_result, str) else ticket_result
-                    print(f"票务查询结果：{ticket_data}")
+        time_result, weather_result, ticket_result = asyncio.run(_run())
 
-                    time_result = await session.call_tool("get_current_time", {"timezone_name": "Asia/Shanghai"})
-                    time_data = json.loads(time_result) if isinstance(time_result, str) else time_result
-                    print(f"当前时间结果：{time_data}")
-                except Exception as exc:
-                    print(f"TravelRead MCP 测试出错：{exc}")
-    except Exception as exc:
-        print(f"连接或会话初始化时发生错误: {exc}")
-        print("请确认服务端脚本已启动并运行在 http://127.0.0.1:8001/mcp")
+        self.assertEqual(time_result["status"], "success")
+        self.assertEqual(time_result["data"]["current_time"], "2026-03-21 09:00:00")
+        self.assertEqual(weather_result["status"], "success")
+        self.assertEqual(weather_result["data"][0]["city"], "北京")
+        self.assertEqual(ticket_result["status"], "success")
+        self.assertEqual(ticket_result["data"][0]["train_number"], "G5")
 
 
 if __name__ == "__main__":
-    asyncio.run(test_travel_read_mcp())
+    unittest.main()

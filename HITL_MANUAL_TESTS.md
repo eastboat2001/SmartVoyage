@@ -220,5 +220,5 @@ yes
 - 是否进入审批态
 - `yes/no` 后的最终回复
 - 是否符合预期
-- 若失败，对应 `logs/app.log`、`logs/a2a.log`、`logs/mcp.log` 的关键错误
+- 若失败，对应 `logs/app.log`、`logs/mcp.log` 的关键错误
 - 如果是在 Web 页面联调失败，也建议同时检查 `logs/web.log`

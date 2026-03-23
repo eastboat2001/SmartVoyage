@@ -1,0 +1,2 @@
+- 当前请求包含相对日期表达时，必须先基于 `current_date` 理解绝对日期，再生成 `weather_brief` 与 `ticket_query`。
+- 生成 `ticket_query` 时，优先把相对日期改写成绝对日期，减少下游票务查询歧义。

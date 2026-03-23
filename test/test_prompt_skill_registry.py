@@ -5,30 +5,30 @@ import unittest
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from main_prompts import SmartVoyagePrompts
-from prompt_skills.registry import prompt_registry
+from skills.runtime import SkillBuildContext, skill_runtime
 
 
 class PromptSkillRegistryTest(unittest.TestCase):
-    def test_registry_builds_all_known_prompts(self):
+    def test_skill_registry_discovers_all_known_role_capability_pairs(self):
         required = [
-            "intent.recognize",
-            "intent.travel-query-context",
-            "travel-read.kind",
-            "travel-read.weather-summary",
-            "travel-read.ticket-summary",
-            "travel-read.weather-plan",
-            "travel-read.ticket-plan",
-            "transport-decision.plan",
-            "transport-decision.auto-order",
-            "order.action",
-            "order.review-decision",
-            "order.date-resolution",
-            "order.operation-extraction",
+            ("supervisor", "intent_recognition"),
+            ("supervisor", "travel_query_context"),
+            ("travel_read", "read_kind"),
+            ("travel_read", "weather_summary"),
+            ("travel_read", "ticket_summary"),
+            ("travel_read", "weather_plan"),
+            ("travel_read", "ticket_plan"),
+            ("supervisor", "decision_plan"),
+            ("supervisor", "auto_order"),
+            ("order", "action_classify"),
+            ("order", "review_decision"),
+            ("order", "date_resolution"),
+            ("order", "operation_extraction"),
         ]
 
-        for prompt_id in required:
-            with self.subTest(prompt_id=prompt_id):
-                prompt = prompt_registry.build(prompt_id)
+        for role, capability in required:
+            with self.subTest(role=role, capability=capability):
+                prompt = skill_runtime.build(role=role, capability=capability)
                 rendered = prompt.format(
                     current_date="2026-03-21",
                     conversation_history="User: test",
@@ -63,6 +63,22 @@ class PromptSkillRegistryTest(unittest.TestCase):
             with self.subTest(builder=builder.__name__):
                 prompt = builder()
                 self.assertIsNotNone(prompt)
+
+    def test_contextual_references_are_loaded_when_flags_match(self):
+        prompt = skill_runtime.build(
+            role="supervisor",
+            capability="decision_plan",
+            build_context=SkillBuildContext.from_flags("has_relative_date", "weather_degraded"),
+        )
+        rendered = prompt.format(
+            current_date="2026-03-21",
+            query="明天从北京去上海坐高铁还是飞机更合适",
+            weather_result="天气服务暂不可用",
+            user_preferences="预算中等",
+        )
+        self.assertIn("补充规则：", rendered)
+        self.assertIn("相对日期表达", rendered)
+        self.assertIn("服务降级或不可用", rendered)
 
 
 if __name__ == "__main__":

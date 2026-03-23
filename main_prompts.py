@@ -1,58 +1,150 @@
-from prompt_skills import prompt_registry
+from skills import SkillBuildContext, skill_runtime
+
+
+RELATIVE_DATE_TOKENS = ("今天", "明天", "后天", "未来")
+TRANSPORT_DECISION_TOKENS = ("高铁还是飞机", "坐高铁还是飞机", "更适合坐高铁还是飞机", "交通建议", "出行建议")
 
 
 class SmartVoyagePrompts:
     @staticmethod
-    def intent_prompt():
-        return prompt_registry.build("intent.recognize")
+    def _contains_relative_date(*texts: str) -> bool:
+        return any(token in (text or "") for token in RELATIVE_DATE_TOKENS for text in texts)
+
+    @staticmethod
+    def _has_query_rewrite_context(conversation_history: str) -> bool:
+        lines = [line for line in (conversation_history or "").splitlines() if line.strip()]
+        return len(lines) > 1
+
+    @staticmethod
+    def _has_transport_decision_request(query: str) -> bool:
+        text = query or ""
+        return any(token in text for token in TRANSPORT_DECISION_TOKENS)
+
+    @staticmethod
+    def _has_pending_context(pending_context: str) -> bool:
+        normalized = (pending_context or "").strip()
+        return bool(normalized and normalized not in {"无", "{}"})
+
+    @staticmethod
+    def _is_weather_degraded(weather_result: str) -> bool:
+        text = weather_result or ""
+        return any(token in text for token in ("天气服务暂不可用", "协作降级", "保守策略"))
+
+    @staticmethod
+    def _is_weather_no_data(weather_result: str) -> bool:
+        text = weather_result or ""
+        return any(token in text for token in ("没有命中", "未找到天气数据", "缺失天气数据"))
+
+    @staticmethod
+    def intent_prompt(*, conversation_history: str = "", query: str = ""):
+        flags = []
+        if SmartVoyagePrompts._has_query_rewrite_context(conversation_history):
+            flags.append("has_query_rewrite_context")
+        if SmartVoyagePrompts._has_transport_decision_request(query):
+            flags.append("has_transport_decision_request")
+        if SmartVoyagePrompts._contains_relative_date(query, conversation_history):
+            flags.append("has_relative_date")
+        return skill_runtime.build(
+            role="supervisor",
+            capability="intent_recognition",
+            build_context=SkillBuildContext.from_flags(*flags),
+        )
 
     @staticmethod
     def summarize_weather_prompt():
-        return prompt_registry.build("travel-read.weather-summary")
+        return skill_runtime.build(role="travel_read", capability="weather_summary")
 
     @staticmethod
     def summarize_ticket_prompt():
-        return prompt_registry.build("travel-read.ticket-summary")
+        return skill_runtime.build(role="travel_read", capability="ticket_summary")
 
     @staticmethod
     def travel_read_kind_prompt():
-        return prompt_registry.build("travel-read.kind")
+        return skill_runtime.build(role="travel_read", capability="read_kind")
 
     @staticmethod
     def travel_query_context_prompt():
-        return prompt_registry.build("intent.travel-query-context")
+        return skill_runtime.build(role="supervisor", capability="travel_query_context")
 
     @staticmethod
-    def transport_decision_prompt():
-        return prompt_registry.build("transport-decision.plan")
+    def transport_decision_prompt(*, query: str = "", weather_result: str = ""):
+        flags = []
+        if SmartVoyagePrompts._contains_relative_date(query):
+            flags.append("has_relative_date")
+        if SmartVoyagePrompts._is_weather_degraded(weather_result):
+            flags.append("weather_degraded")
+        if SmartVoyagePrompts._is_weather_no_data(weather_result):
+            flags.append("weather_no_data")
+        return skill_runtime.build(
+            role="supervisor",
+            capability="decision_plan",
+            build_context=SkillBuildContext.from_flags(*flags),
+        )
 
     @staticmethod
-    def order_action_prompt():
-        return prompt_registry.build("order.action")
+    def order_action_prompt(*, pending_context: str = ""):
+        flags = []
+        if SmartVoyagePrompts._has_pending_context(pending_context):
+            flags.append("has_pending_context")
+        return skill_runtime.build(
+            role="order",
+            capability="action_classify",
+            build_context=SkillBuildContext.from_flags(*flags),
+        )
 
     @staticmethod
     def review_decision_prompt():
-        return prompt_registry.build("order.review-decision")
+        return skill_runtime.build(role="order", capability="review_decision")
 
     @staticmethod
-    def date_resolution_prompt():
-        return prompt_registry.build("order.date-resolution")
+    def date_resolution_prompt(*, query: str = ""):
+        flags = []
+        if SmartVoyagePrompts._contains_relative_date(query):
+            flags.append("has_relative_date")
+        return skill_runtime.build(
+            role="order",
+            capability="date_resolution",
+            build_context=SkillBuildContext.from_flags(*flags),
+        )
 
     @staticmethod
-    def weather_query_plan_prompt():
-        return prompt_registry.build("travel-read.weather-plan")
+    def weather_query_plan_prompt(*, conversation_history: str = "", query: str = ""):
+        flags = []
+        if SmartVoyagePrompts._contains_relative_date(query, conversation_history):
+            flags.append("has_relative_date")
+        return skill_runtime.build(
+            role="travel_read",
+            capability="weather_plan",
+            build_context=SkillBuildContext.from_flags(*flags),
+        )
 
     @staticmethod
-    def ticket_query_plan_prompt():
-        return prompt_registry.build("travel-read.ticket-plan")
+    def ticket_query_plan_prompt(*, conversation_history: str = "", query: str = ""):
+        flags = []
+        if SmartVoyagePrompts._contains_relative_date(query, conversation_history):
+            flags.append("has_relative_date")
+        return skill_runtime.build(
+            role="travel_read",
+            capability="ticket_plan",
+            build_context=SkillBuildContext.from_flags(*flags),
+        )
 
     @staticmethod
     def auto_order_intent_prompt():
-        return prompt_registry.build("transport-decision.auto-order")
+        return skill_runtime.build(role="supervisor", capability="auto_order")
 
     @staticmethod
-    def order_operation_extraction_prompt():
-        return prompt_registry.build("order.operation-extraction")
+    def order_operation_extraction_prompt(*, action: str = "", pending_context: str = ""):
+        flags = []
+        if SmartVoyagePrompts._has_pending_context(pending_context):
+            flags.append("has_pending_context")
+        if action == "change_order":
+            flags.append("is_change_order")
+        return skill_runtime.build(
+            role="order",
+            capability="operation_extraction",
+            build_context=SkillBuildContext.from_flags(*flags),
+        )
 
 
 if __name__ == "__main__":

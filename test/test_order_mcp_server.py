@@ -1,55 +1,119 @@
 import asyncio
+import json
 import os
+import subprocess
 import sys
+import time
+import unittest
+from pathlib import Path
 
-from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import Config
-from create_logger import logger
-from utils.model_factory import build_chat_model, build_order_agent, extract_text_from_agent_result
-
-conf = Config()
-
-# 初始化LLM
-llm = build_chat_model(
-    conf,
-)
+ROOT = Path(__file__).resolve().parents[1]
+SERVER_URL = "http://127.0.0.1:8003/mcp"
 
 
-async def order_tickets(query):
-    try:
-        # 启动 MCP server，通过streamable建立连接
-        async with streamablehttp_client("http://127.0.0.1:8003/mcp") as (read, write, _):
-            # 使用读写通道创建 MCP 会话
-            async with ClientSession(read, write) as session:
-                try:
+def _unwrap(result):
+    if hasattr(result, "content") and result.content:
+        texts = []
+        for item in result.content:
+            text = getattr(item, "text", None)
+            if text is not None:
+                texts.append(text)
+        return "\n".join(texts)
+    return str(result)
+
+
+class OrderMCPIntegrationTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
+        cls.process = subprocess.Popen(
+            [sys.executable, "-u", "mcp_server/mcp_order_server.py"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(3)
+
+    @classmethod
+    def tearDownClass(cls):
+        if getattr(cls, "process", None) and cls.process.poll() is None:
+            cls.process.terminate()
+            try:
+                cls.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                cls.process.kill()
+                cls.process.wait(timeout=5)
+
+    def test_order_create_query_cancel_cycle(self):
+        async def _run():
+            async with streamablehttp_client(SERVER_URL) as (read, write, _):
+                async with ClientSession(read, write) as session:
                     await session.initialize()
 
-                    # 从 session 自动获取 MCP server 提供的工具列表。
-                    tools = await load_mcp_tools(session)
-                    agent = build_order_agent(llm, tools)
-                    response = await agent.ainvoke(
-                        {"messages": [{"role": "user", "content": query}]}
+                    before = _unwrap(await session.call_tool("query_user_orders", {"username": "demo_user", "departure_date": "2026-03-21"}))
+                    created = _unwrap(
+                        await session.call_tool(
+                            "order_train",
+                            {
+                                "username": "demo_user",
+                                "departure_date": "2026-03-21",
+                                "train_number": "G5",
+                                "seat_type": "二等座",
+                                "number": 1,
+                            },
+                        )
                     )
-                    return extract_text_from_agent_result(response)
-                except Exception as e:
-                    logger.info(f"票务 MCP 测试出错：{str(e)}")
-                    return f"票务 MCP 查询出错：{str(e)}"
-    except Exception as e:
-        logger.error(f"连接或会话初始化时发生错误: {e}")
-        return "连接或会话初始化时发生错误"
+                    try:
+                        after_create = _unwrap(
+                            await session.call_tool(
+                                "query_user_orders",
+                                {"username": "demo_user", "departure_date": "2026-03-21"},
+                            )
+                        )
+                    finally:
+                        cancelled = _unwrap(
+                            await session.call_tool(
+                                "cancel_ticket_order",
+                                {
+                                    "username": "demo_user",
+                                    "departure_date": "2026-03-21",
+                                    "departure_city": "北京",
+                                    "arrival_city": "上海",
+                                    "transport_no": "G5",
+                                    "ticket_type": "二等座",
+                                    "order_type": "train",
+                                },
+                            )
+                        )
+                    after_cancel = _unwrap(
+                        await session.call_tool(
+                            "query_user_orders",
+                            {"username": "demo_user", "departure_date": "2026-03-21"},
+                        )
+                    )
+                    return {
+                        "before": before,
+                        "created": created,
+                        "after_create": after_create,
+                        "cancelled": cancelled,
+                        "after_cancel": after_cancel,
+                    }
+
+        result = asyncio.run(_run())
+
+        self.assertIn("没有已预订订单", result["before"])
+        self.assertIn("预订成功", result["created"])
+        self.assertIn("订单#", result["after_create"])
+        self.assertIn("退票成功", result["cancelled"])
+        self.assertIn("没有已预订订单", result["after_cancel"])
 
 
 if __name__ == "__main__":
-    print("示例：当前用户：demo_user\\n帮我预订2026-03-21北京到上海的高铁票，二等座1张")
-    print("示例：当前用户：demo_user\\n帮我退掉2026-03-21北京到上海的高铁票")
-    print("示例：当前用户：demo_user\\n把我2026-03-21北京到上海的高铁票改签到2026-03-22二等座")
-    while True:
-        query = input("请输入查询：")
-        if query == "exit":
-            break
-        print(asyncio.run(order_tickets(query)))
+    unittest.main()

@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from config import Config
 from create_logger import logger
 from utils.fastapi_middleware import install_common_middleware
-from utils.orchestrator import SmartVoyageOrchestrator
+from agents.supervisor import SmartVoyageSupervisor
 
 
 ROOT = Path(__file__).resolve().parent
@@ -50,7 +50,7 @@ class SessionStore:
 
 
 conf = Config()
-orchestrator = SmartVoyageOrchestrator(conf)
+orchestrator = SmartVoyageSupervisor(conf)
 session_store = SessionStore()
 
 app = FastAPI(title="SmartVoyage Web")

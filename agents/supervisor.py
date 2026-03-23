@@ -1,22 +1,21 @@
 from __future__ import annotations
 
-import asyncio
-import json
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
+from agents.order import OrderSubagent
+from agents.travel_read import TravelReadSubagent
 from config import Config
 from create_logger import logger
 from main_prompts import SmartVoyagePrompts
+from utils.agent_protocol import LocalAgentRequest
 from utils.db import get_db_connection
 from utils.request_context import clear_request_id, ensure_request_id
 from utils.resilient_llm import ResilientModelInvoker
 from utils.order_action_context import with_order_action
-from utils.service_protocol import AgentInvokeRequest, AgentInvokeResponse
 from utils.structured_outputs import (
     AutoOrderIntentResult,
     IntentRecognitionResult,
@@ -26,17 +25,10 @@ from utils.structured_outputs import (
 from utils.time_utils import get_current_date_str
 from utils.travel_read_context import extract_travel_read_kind, strip_travel_read_kind, with_travel_read_kind
 
-
-DEFAULT_AGENT_URLS = {
-    "TravelDecisionAgent": "http://localhost:5005",
-    "TransportOrderAgent": "http://localhost:5007",
-}
-
 DEFAULT_AGENT_METADATA = {
-    "TravelDecisionAgent": {
-        "name": "TravelDecisionAgent",
-        "description": "统一处理天气、时间、票务读取的交通决策前置助手",
-        "url": "http://localhost:5005",
+    "TravelReadSubagent": {
+        "name": "TravelReadSubagent",
+        "description": "统一处理天气、时间、票务读取的只读专家子代理",
         "skills": [
             {
                 "name": "travel-read",
@@ -44,10 +36,9 @@ DEFAULT_AGENT_METADATA = {
             }
         ],
     },
-    "TransportOrderAgent": {
-        "name": "TransportOrderAgent",
-        "description": "负责交通订单创建、查询、退票与改签的订单生命周期助手",
-        "url": "http://localhost:5007",
+    "OrderSubagent": {
+        "name": "OrderSubagent",
+        "description": "负责交通订单创建、查询、退票与改签的订单生命周期子代理",
         "skills": [
             {
                 "name": "transport-order",
@@ -122,11 +113,12 @@ class TransportDecisionWorkflowState(TypedDict, total=False):
     final_response: str
 
 
-class SmartVoyageOrchestrator:
+class SmartVoyageSupervisor:
     def __init__(self, config: Config):
         self.config = config
         self.invoker = ResilientModelInvoker(config)
-        self.agent_urls = dict(DEFAULT_AGENT_URLS)
+        self.travel_read_agent = TravelReadSubagent(config)
+        self.order_agent = OrderSubagent(config, self.travel_read_agent)
         self.agent_metadata = dict(DEFAULT_AGENT_METADATA)
         self.current_username = config.default_username
         self.transport_decision_workflow = self._build_transport_decision_workflow()
@@ -205,7 +197,7 @@ class SmartVoyageOrchestrator:
     def recognize_intent(self, user_input: str, conversation_history: str):
         current_date = get_current_date_str(self.config)
         result = self.invoker.invoke_structured(
-            SmartVoyagePrompts.intent_prompt(),
+            SmartVoyagePrompts.intent_prompt(conversation_history="\n".join(conversation_history.split("\n")[-6:]), query=user_input),
             IntentRecognitionResult,
             {
                 "conversation_history": "\n".join(conversation_history.split("\n")[-6:]),
@@ -236,7 +228,7 @@ class SmartVoyageOrchestrator:
         pending_order_context: dict | None = None,
     ) -> dict:
         request_id = ensure_request_id()
-        logger.info(f"[{request_id}] orchestrator received prompt")
+        logger.info(f"[{request_id}] supervisor received prompt")
         user_profile = self._load_user_preferences()
         try:
             if pending_order_context and pending_order_context.get("action") == "hitl_review":
@@ -265,12 +257,16 @@ class SmartVoyageOrchestrator:
                 }
 
             if follow_up_message:
-                return {
-                    "response": follow_up_message,
-                    "intents": intents,
-                    "routed_agents": [],
-                    "pending_order_context": pending_order_context,
-                }
+                if self._has_order_intent(intents):
+                    logger.info("订单意图已识别，忽略 intent 层追问，继续交给 OrderSubagent 生成带 pending context 的补问。")
+                    follow_up_message = ""
+                else:
+                    return {
+                        "response": follow_up_message,
+                        "intents": intents,
+                        "routed_agents": [],
+                        "pending_order_context": pending_order_context,
+                    }
 
             home_city_follow_up = self._maybe_follow_up_with_home_city(intents, user_queries, user_profile)
             if home_city_follow_up:
@@ -329,7 +325,7 @@ class SmartVoyageOrchestrator:
         pending_order_context: dict[str, Any],
     ) -> dict:
         review_query = self._with_pending_order_context(prompt, pending_order_context)
-        result = self._call_agent("TransportOrderAgent", review_query, conversation_history)
+        result = self._call_agent("OrderSubagent", review_query, conversation_history)
         next_pending = result.pending_order_context or {}
         review_payload = next_pending.get("review_payload", {}) if isinstance(next_pending, dict) else {}
         if not review_payload and isinstance(pending_order_context, dict):
@@ -344,14 +340,14 @@ class SmartVoyageOrchestrator:
             resume_intent = "order"
 
         source_intent = ""
-        source_routed_agents: list[str] = ["TransportOrderAgent"]
+        source_routed_agents: list[str] = ["OrderSubagent"]
         response_prefix = ""
         if isinstance(pending_order_context, dict):
             source_intent = str(pending_order_context.get("source_intent", "")).strip()
             source_routed_agents = list(pending_order_context.get("source_routed_agents", source_routed_agents))
             response_prefix = str(pending_order_context.get("response_prefix", "")).strip()
 
-        response_text = self._finalize_agent_response("TransportOrderAgent", review_query, result)
+        response_text = self._finalize_agent_response("OrderSubagent", review_query, result)
         if source_intent == "transport_decision":
             if response_prefix:
                 response_text = f"{response_prefix}\n\n预订结果：{response_text}"
@@ -365,7 +361,7 @@ class SmartVoyageOrchestrator:
         return {
             "response": response_text,
             "intents": [resume_intent],
-            "routed_agents": ["TransportOrderAgent"],
+            "routed_agents": ["OrderSubagent"],
             "pending_order_context": next_pending,
         }
 
@@ -405,7 +401,7 @@ class SmartVoyageOrchestrator:
     def _transport_decision_weather_node(self, state: TransportDecisionWorkflowState) -> dict[str, Any]:
         weather_query = state["weather_query"]
         weather_result = self._call_agent(
-            "TravelDecisionAgent",
+            "TravelReadSubagent",
             with_travel_read_kind(weather_query, "weather"),
             state["conversation_history"],
         )
@@ -422,12 +418,12 @@ class SmartVoyageOrchestrator:
             "weather_result_data": weather_result.data or {},
             "weather_degraded": weather_result.degraded,
             "weather_no_data": weather_result.no_data,
-            "routed_agents": ["TravelDecisionAgent"],
+            "routed_agents": ["TravelReadSubagent"],
         }
 
     def _transport_decision_plan_node(self, state: TransportDecisionWorkflowState) -> dict[str, Any]:
         plan = self.invoker.invoke_structured(
-            SmartVoyagePrompts.transport_decision_prompt(),
+            SmartVoyagePrompts.transport_decision_prompt(query=state["decision_query"], weather_result=state["weather_result_text"]),
             TransportDecisionPlanResult,
             {
                 "query": state["decision_query"],
@@ -454,7 +450,7 @@ class SmartVoyageOrchestrator:
         plan = state["plan"]
         ticket_query = plan["ticket_query"]
         ticket_result = self._call_agent(
-            "TravelDecisionAgent",
+            "TravelReadSubagent",
             with_travel_read_kind(ticket_query, "ticket"),
             state["conversation_history"],
         )
@@ -462,7 +458,7 @@ class SmartVoyageOrchestrator:
             "ticket_result_text": ticket_result.text,
             "ticket_result_state": ticket_result.state,
             "ticket_result_data": ticket_result.data or {},
-            "routed_agents": list(dict.fromkeys(state.get("routed_agents", []) + ["TravelDecisionAgent"])),
+            "routed_agents": list(dict.fromkeys(state.get("routed_agents", []) + ["TravelReadSubagent"])),
         }
 
     @staticmethod
@@ -481,7 +477,7 @@ class SmartVoyageOrchestrator:
         )
         order_query = self._with_user_context("order", order_query)
         order_result = self._call_agent(
-            "TransportOrderAgent",
+            "OrderSubagent",
             order_query,
             state["conversation_history"],
         )
@@ -489,13 +485,13 @@ class SmartVoyageOrchestrator:
             "order_result_text": order_result.text,
             "order_result_state": order_result.state,
             "order_result_pending_context": order_result.pending_order_context or {},
-            "routed_agents": list(dict.fromkeys(state.get("routed_agents", []) + ["TransportOrderAgent"])),
+            "routed_agents": list(dict.fromkeys(state.get("routed_agents", []) + ["OrderSubagent"])),
         }
 
     def _transport_decision_finalize_node(self, state: TransportDecisionWorkflowState) -> dict[str, Any]:
         plan = state["plan"]
         ticket_result = AgentExecutionResult(
-            agent_name="TravelDecisionAgent",
+            agent_name="TravelReadSubagent",
             state=state.get("ticket_result_state", "failed"),
             text=state.get("ticket_result_text", ""),
             data=state.get("ticket_result_data", {}),
@@ -503,14 +499,14 @@ class SmartVoyageOrchestrator:
         sections = [
             f"天气判断：{plan.get('weather_brief') or state.get('weather_result_text', '')}",
             f"出行建议：建议优先选择{self._transport_label(plan['transport_mode'])}。{plan['recommendation_reason']}",
-            f"票务结果：{self._finalize_agent_response('TravelDecisionAgent', with_travel_read_kind(plan['ticket_query'], 'ticket'), ticket_result)}",
+            f"票务结果：{self._finalize_agent_response('TravelReadSubagent', with_travel_read_kind(plan['ticket_query'], 'ticket'), ticket_result)}",
         ]
         response_prefix = "\n\n".join(sections)
 
         if plan.get("should_order"):
             if state.get("ticket_result_state") == "completed" and state.get("order_result_text"):
                 order_result = AgentExecutionResult(
-                    agent_name="TransportOrderAgent",
+                    agent_name="OrderSubagent",
                     state=state.get("order_result_state", "failed"),
                     text=state.get("order_result_text", ""),
                 )
@@ -524,7 +520,7 @@ class SmartVoyageOrchestrator:
                     ),
                 )
                 sections.append(
-                    f"预订结果：{self._finalize_agent_response('TransportOrderAgent', order_query, order_result)}"
+                    f"预订结果：{self._finalize_agent_response('OrderSubagent', order_query, order_result)}"
                 )
             else:
                 sections.append("预订结果：由于前一步没有查到可用票务数据，本次没有继续提交订票请求。")
@@ -537,7 +533,7 @@ class SmartVoyageOrchestrator:
         pending_context = dict(state.get("order_result_pending_context", {}) or {})
         if pending_context:
             pending_context.setdefault("source_intent", "transport_decision")
-            pending_context.setdefault("source_routed_agents", list(dict.fromkeys(state.get("routed_agents", []) + ["TransportOrderAgent"])))
+            pending_context.setdefault("source_routed_agents", list(dict.fromkeys(state.get("routed_agents", []) + ["OrderSubagent"])))
             pending_context.setdefault("response_prefix", response_prefix)
 
         return {
@@ -595,14 +591,14 @@ class SmartVoyageOrchestrator:
 
         read_kind = extract_travel_read_kind(query_str)
 
-        if agent_name == "TravelDecisionAgent" and read_kind == "weather":
+        if agent_name == "TravelReadSubagent" and read_kind == "weather":
             return self.invoker.invoke_text(
                 SmartVoyagePrompts.summarize_weather_prompt(),
                 {"query": strip_travel_read_kind(query_str), "raw_response": result.text},
                 description="天气总结",
             )
 
-        if agent_name == "TravelDecisionAgent" and read_kind == "ticket":
+        if agent_name == "TravelReadSubagent" and read_kind == "ticket":
             clean_query = strip_travel_read_kind(query_str)
             direct_response = self._build_ticket_fact_response(clean_query, result.data or {})
             if direct_response:
@@ -621,9 +617,38 @@ class SmartVoyageOrchestrator:
         query_str: str,
         conversation_history: str,
     ) -> AgentExecutionResult:
+        chat_history = "\n".join(conversation_history.split("\n")[-7:-1]) + f"\nUser: {query_str}"
+        request_id = ensure_request_id()
         try:
-            return self._run_sync(
-                self._call_agent_async(agent_name, query_str, conversation_history)
+            if agent_name == "TravelReadSubagent":
+                payload = self.travel_read_agent.invoke(
+                    LocalAgentRequest(
+                        text=chat_history,
+                        conversation_history=conversation_history,
+                        request_id=request_id,
+                        now_override=self.config.now_override,
+                    )
+                )
+            else:
+                payload = self.order_agent.invoke(
+                    LocalAgentRequest(
+                        text=chat_history,
+                        conversation_history=conversation_history,
+                        request_id=request_id,
+                        now_override=self.config.now_override,
+                    )
+                )
+            state = payload.state
+            text = payload.text
+            return AgentExecutionResult(
+                agent_name=agent_name,
+                state=state,
+                text=text,
+                degraded=state == "failed",
+                no_data="未找到" in text,
+                pending_order_context=payload.pending_order_context or None,
+                data=payload.data or None,
+                meta=payload.meta or None,
             )
         except Exception as exc:
             logger.error(f"{agent_name} 调用失败: {exc}")
@@ -634,71 +659,12 @@ class SmartVoyageOrchestrator:
                 degraded=True,
             )
 
-    async def _call_agent_async(
-        self,
-        agent_name: str,
-        query_str: str,
-        conversation_history: str,
-    ) -> AgentExecutionResult:
-        chat_history = "\n".join(conversation_history.split("\n")[-7:-1]) + f"\nUser: {query_str}"
-        request_id = ensure_request_id()
-
-        try:
-            async with httpx.AsyncClient(timeout=self.config.agent_timeout_seconds) as client:
-                response = await client.post(
-                    f"{self.agent_urls[agent_name]}/invoke",
-                    json=AgentInvokeRequest(
-                        text=chat_history,
-                        conversation_history=conversation_history,
-                        request_id=request_id,
-                        now_override=self.config.now_override,
-                    ).model_dump(),
-                    headers={"x-request-id": request_id},
-                )
-                response.raise_for_status()
-                payload = AgentInvokeResponse.model_validate(response.json())
-        except httpx.TimeoutException:
-            logger.warning(f"{agent_name} 调用超时，已触发降级。")
-            return AgentExecutionResult(
-                agent_name=agent_name,
-                state="failed",
-                text=self._agent_timeout_message(agent_name),
-                degraded=True,
-            )
-        except Exception as exc:
-            logger.error(f"{agent_name} HTTP 调用失败: {exc}")
-            raise
-
-        state = payload.state
-        text = payload.text
-
-        return AgentExecutionResult(
-            agent_name=agent_name,
-            state=state,
-            text=text,
-            degraded=state == "failed",
-            no_data="未找到" in text,
-            pending_order_context=payload.pending_order_context or None,
-            data=payload.data or None,
-            meta=payload.meta or None,
-        )
-
-    def _run_sync(self, coro):
-        try:
-            return asyncio.run(coro)
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            try:
-                return loop.run_until_complete(coro)
-            finally:
-                loop.close()
-
     @staticmethod
     def _agent_name_for_intent(intent: str) -> str | None:
         if intent in {"weather", "time", "flight", "train"}:
-            return "TravelDecisionAgent"
+            return "TravelReadSubagent"
         if intent in {"order", "my_orders", "cancel_order", "change_order"}:
-            return "TransportOrderAgent"
+            return "OrderSubagent"
         return None
 
     @staticmethod
@@ -854,15 +820,17 @@ class SmartVoyageOrchestrator:
     @staticmethod
     def _agent_timeout_message(agent_name: str) -> str:
         messages = {
-            "TravelDecisionAgent": "交通读取服务响应超时，当前无法完成天气、时间或票务查询。请稍后重试。",
-            "TransportOrderAgent": "订单服务响应超时，当前没有完成实际下单或订单变更。请稍后重试，避免重复提交。",
+            "TravelReadSubagent": "交通读取服务响应超时，当前无法完成天气、时间或票务查询。请稍后重试。",
+            "OrderSubagent": "订单服务响应超时，当前没有完成实际下单或订单变更。请稍后重试，避免重复提交。",
         }
         return messages.get(agent_name, "服务响应超时，请稍后重试。")
 
     @staticmethod
     def _agent_error_message(agent_name: str, default_message: str) -> str:
         messages = {
-            "TravelDecisionAgent": "交通读取服务当前不可用，请稍后重试天气、时间或票务查询。",
-            "TransportOrderAgent": "订单服务当前不可用，当前没有完成实际下单或订单变更。",
+            "TravelReadSubagent": "交通读取服务当前不可用，请稍后重试天气、时间或票务查询。",
+            "OrderSubagent": "订单服务当前不可用，当前没有完成实际下单或订单变更。",
         }
         return messages.get(agent_name, default_message)
+
+

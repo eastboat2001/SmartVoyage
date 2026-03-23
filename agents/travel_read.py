@@ -1,52 +1,39 @@
-"""
-travel_decision_server.py：统一交通读取与决策前置 FastAPI 服务，负责天气、时间、票务查询。
-"""
-import json
-import os
-import sys
+from __future__ import annotations
 
-import uvicorn
-from fastapi import FastAPI
+import asyncio
+import json
+from typing import Any
+
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config
 from create_logger import logger
 from main_prompts import SmartVoyagePrompts
-from utils.fastapi_middleware import install_common_middleware
+from utils.agent_protocol import LocalAgentRequest, LocalAgentResponse
+from utils.error_utils import format_exception_details
 from utils.request_context import ensure_request_id, set_request_id
 from utils.resilient_llm import ResilientModelInvoker
-from utils.service_protocol import (
-    AgentInvokeRequest,
-    AgentInvokeResponse,
-    AgentMetadataResponse,
-    AgentSkillDescriptor,
-)
 from utils.structured_outputs import TicketQueryPlanResult, TravelReadKindResult, WeatherQueryPlanResult
 from utils.time_utils import get_current_date_str
 from utils.travel_read_context import extract_travel_read_kind, strip_travel_read_kind
 
 
-conf = Config()
-
-SERVICE_NAME = "TravelDecisionAgent"
-SERVICE_URL = "http://localhost:5005"
-SERVICE_VERSION = "2.0.0"
-SERVICE_DESCRIPTION = "统一处理天气、时间、票务读取的交通决策前置助手"
-SERVICE_SKILLS = [
-    AgentSkillDescriptor(
-        name="travel-read",
-        description="执行天气查询、当前时间查询、火车票与机票查询，支持自然语言输入",
-        examples=[
+AGENT_NAME = "TravelReadSubagent"
+AGENT_DESCRIPTION = "统一处理天气、时间、票务读取的只读专家子代理"
+AGENT_SKILLS = [
+    {
+        "name": "travel-read",
+        "description": "执行天气查询、当前时间查询、火车票与机票查询，支持自然语言输入",
+        "examples": [
             "今天北京天气如何",
             "现在几点",
             "查询2026-03-21北京到上海的高铁票",
             "查询2026-03-21北京到上海的机票",
         ],
-    )
+    }
 ]
+
 
 async def call_travel_read_tool(tool_name: str, params: dict) -> str:
     try:
@@ -57,13 +44,20 @@ async def call_travel_read_tool(tool_name: str, params: dict) -> str:
                 result_data = json.loads(result) if isinstance(result, str) else result
                 return result_data.content[0].text
     except Exception as exc:
-        logger.error(f"TravelReadTools 调用失败: tool={tool_name}, error={exc}")
-        return json.dumps({"status": "error", "message": f"TravelReadTools 调用失败：{exc}"}, ensure_ascii=False)
+        error_detail = format_exception_details(exc)
+        logger.error(f"TravelReadTools 调用失败: tool={tool_name}, error={error_detail}")
+        return json.dumps({"status": "error", "message": f"TravelReadTools 调用失败：{error_detail}"}, ensure_ascii=False)
 
 
-class TravelDecisionService:
-    def __init__(self):
-        self.invoker = ResilientModelInvoker(conf)
+class TravelReadSubagent:
+    def __init__(self, config: Config):
+        self.config = config
+        self.invoker = ResilientModelInvoker(config)
+        self.metadata = {
+            "name": AGENT_NAME,
+            "description": AGENT_DESCRIPTION,
+            "skills": AGENT_SKILLS,
+        }
 
     @staticmethod
     def latest_query(conversation: str) -> str:
@@ -86,9 +80,9 @@ class TravelDecisionService:
                 "conversation_history": conversation,
                 "query": query,
             },
-            description="TravelDecision 读取类型分类",
+            description="TravelRead 读取类型分类",
         )
-        logger.info(f"TravelDecision 读取类型结构化输出: {result.model_dump()}")
+        logger.info(f"TravelRead 读取类型结构化输出: {result.model_dump()}")
         return result.kind
 
     @staticmethod
@@ -96,38 +90,39 @@ class TravelDecisionService:
         return value.replace("'", "''")
 
     def generate_weather_plan(self, conversation: str, now_override: str = "") -> dict:
+        query = strip_travel_read_kind(self.latest_query(conversation))
         result = self.invoker.invoke_structured(
-            SmartVoyagePrompts.weather_query_plan_prompt(),
+            SmartVoyagePrompts.weather_query_plan_prompt(conversation_history=conversation, query=query),
             WeatherQueryPlanResult,
             {
                 "conversation_history": conversation,
-                "query": strip_travel_read_kind(self.latest_query(conversation)),
-                "current_date": get_current_date_str(conf, override=now_override),
+                "query": query,
+                "current_date": get_current_date_str(self.config, override=now_override),
             },
-            description="TravelDecision 天气查询计划生成",
+            description="TravelRead 天气查询计划生成",
         )
-        logger.info(f"TravelDecision 天气查询计划输出: {result.model_dump()}")
+        logger.info(f"TravelRead 天气查询计划输出: {result.model_dump()}")
         return result.model_dump()
 
     def generate_ticket_plan(self, conversation: str, now_override: str = "") -> dict:
+        query = strip_travel_read_kind(self.latest_query(conversation))
         result = self.invoker.invoke_structured(
-            SmartVoyagePrompts.ticket_query_plan_prompt(),
+            SmartVoyagePrompts.ticket_query_plan_prompt(conversation_history=conversation, query=query),
             TicketQueryPlanResult,
             {
                 "conversation_history": conversation,
-                "query": strip_travel_read_kind(self.latest_query(conversation)),
-                "current_date": get_current_date_str(conf, override=now_override),
+                "query": query,
+                "current_date": get_current_date_str(self.config, override=now_override),
             },
-            description="TravelDecision 票务查询计划生成",
+            description="TravelRead 票务查询计划生成",
         )
-        logger.info(f"TravelDecision 票务查询计划输出: {result.model_dump()}")
+        logger.info(f"TravelRead 票务查询计划输出: {result.model_dump()}")
         return result.model_dump()
 
     def compile_weather_sql(self, plan: dict) -> str:
         city = self._sql_literal(plan["city"].strip())
         date_from = self._sql_literal(plan["date_from"].strip())
         date_to = self._sql_literal((plan.get("date_to") or plan["date_from"]).strip())
-        # Query plan is structured by the LLM; SQL shape stays under backend control.
         return (
             "SELECT city, fx_date, temp_max, temp_min, text_day, text_night, humidity, wind_dir_day, precip "
             "FROM weather_data "
@@ -143,7 +138,6 @@ class TravelDecisionService:
         table_name = "train_tickets" if query_type == "train" else "flight_tickets"
         transport_column = "train_number" if query_type == "train" else "flight_number"
         ticket_type_column = "seat_type" if query_type == "train" else "cabin_type"
-        # Query plan controls filters; backend controls table, fields, sort and limit.
         select_columns = (
             f"id, departure_city, arrival_city, departure_time, arrival_time, {transport_column}, "
             f"{ticket_type_column}, price, remaining_seats"
@@ -257,13 +251,13 @@ class TravelDecisionService:
         )
         return "completed", text, {"kind": "time", "current_time": data}
 
-    async def invoke(self, request: AgentInvokeRequest) -> AgentInvokeResponse:
+    async def ainvoke(self, request: LocalAgentRequest) -> LocalAgentResponse:
         request_id = request.request_id or ensure_request_id()
         set_request_id(request_id)
-        logger.info(f"[{request_id}] TravelDecision 收到对话: {request.text}")
+        logger.info(f"[{request_id}] TravelRead 收到对话: {request.text}")
         now_override = request.now_override.strip()
         kind = self.infer_kind(request.text)
-        logger.info(f"[{request_id}] TravelDecision 读取类型: {kind}")
+        logger.info(f"[{request_id}] TravelRead 读取类型: {kind}")
 
         if kind == "time":
             raw = await call_travel_read_tool(
@@ -272,24 +266,24 @@ class TravelDecisionService:
             )
             response = json.loads(raw) if isinstance(raw, str) else raw
             state, text, data = self.format_time_response(response)
-            return AgentInvokeResponse(state=state, text=text, data=data, meta={"kind": "time", "tool": "get_current_time"})
+            return LocalAgentResponse(state=state, text=text, data=data, meta={"kind": "time", "tool": "get_current_time"})
 
         if kind == "weather":
             plan = self.generate_weather_plan(request.text, now_override=now_override)
             if plan["status"] == "input_required":
-                return AgentInvokeResponse(
+                return LocalAgentResponse(
                     state="input_required",
                     text=plan["message"],
                     data={"kind": "weather", "weather_days": [], "query_plan": plan},
                     meta={"kind": "weather", "query_plan": plan},
                 )
             sql = self.compile_weather_sql(plan)
-            logger.info(f"[{request_id}] TravelDecision 天气 SQL 编译结果: {sql}")
+            logger.info(f"[{request_id}] TravelRead 天气 SQL 编译结果: {sql}")
             raw = await call_travel_read_tool("query_weather", {"sql": sql})
             response = json.loads(raw) if isinstance(raw, str) else raw
             state, text, data = self.format_weather_response(response)
             data["query_plan"] = plan
-            return AgentInvokeResponse(
+            return LocalAgentResponse(
                 state=state,
                 text=text,
                 data=data,
@@ -298,51 +292,31 @@ class TravelDecisionService:
 
         plan = self.generate_ticket_plan(request.text, now_override=now_override)
         if plan["status"] == "input_required":
-            return AgentInvokeResponse(
+            return LocalAgentResponse(
                 state="input_required",
                 text=plan["message"],
                 data={"kind": "ticket", "query_type": plan.get("type", ""), "tickets": [], "query_plan": plan},
                 meta={"kind": "ticket", "query_plan": plan},
             )
         sql = self.compile_ticket_sql(plan)
-        logger.info(f"[{request_id}] TravelDecision 票务 SQL 编译结果: {sql}")
+        logger.info(f"[{request_id}] TravelRead 票务 SQL 编译结果: {sql}")
         raw = await call_travel_read_tool("query_tickets", {"sql": sql})
         response = json.loads(raw) if isinstance(raw, str) else raw
         state, text, data = self.format_ticket_response(response, plan["type"])
         data["query_plan"] = plan
-        return AgentInvokeResponse(
+        return LocalAgentResponse(
             state=state,
             text=text,
             data=data,
             meta={"kind": "ticket", "tool": "query_tickets", "query_plan": plan, "sql": sql, "row_count": len(data.get("tickets", []))},
         )
 
-
-app = FastAPI(title=SERVICE_NAME)
-install_common_middleware(app)
-service = TravelDecisionService()
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": SERVICE_NAME}
-
-
-@app.get("/metadata", response_model=AgentMetadataResponse)
-async def metadata():
-    return AgentMetadataResponse(
-        name=SERVICE_NAME,
-        description=SERVICE_DESCRIPTION,
-        version=SERVICE_VERSION,
-        url=SERVICE_URL,
-        skills=SERVICE_SKILLS,
-    )
-
-
-@app.post("/invoke", response_model=AgentInvokeResponse)
-async def invoke(request: AgentInvokeRequest):
-    return await service.invoke(request)
-
-
-if __name__ == "__main__":
-    uvicorn.run("a2a_server.travel_decision_server:app", host="127.0.0.1", port=5005, reload=False)
+    def invoke(self, request: LocalAgentRequest) -> LocalAgentResponse:
+        try:
+            return asyncio.run(self.ainvoke(request))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(self.ainvoke(request))
+            finally:
+                loop.close()

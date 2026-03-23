@@ -42,6 +42,8 @@ class ResilientModelInvoker:
             retries=retries,
             factory=lambda model: prompt | build_structured_llm(model, schema),
             payload=payload,
+            validate_result=lambda result: result is not None and hasattr(result, "model_dump"),
+            invalid_result_message="结构化输出为空或不符合预期",
         )
 
     def invoke_text(
@@ -92,6 +94,8 @@ class ResilientModelInvoker:
         retries: int,
         factory,
         payload: dict[str, Any],
+        validate_result=None,
+        invalid_result_message: str = "模型返回了无效结果",
     ) -> Any:
         errors: list[str] = []
         for model_label, model in self._iter_models():
@@ -100,7 +104,10 @@ class ResilientModelInvoker:
                     logger.info(
                         f"{description}: 使用 {model_label} 模型执行，第 {attempt} 次尝试。"
                     )
-                    return factory(model).invoke(payload)
+                    result = factory(model).invoke(payload)
+                    if validate_result is not None and not validate_result(result):
+                        raise RuntimeError(invalid_result_message)
+                    return result
                 except Exception as exc:
                     error_text = f"{model_label} attempt {attempt}: {exc}"
                     errors.append(error_text)

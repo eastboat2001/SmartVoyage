@@ -31,8 +31,6 @@ PYTHON = sys.executable
 SERVICES = [
     ("mcp-travel-read", [PYTHON, "-u", "mcp_server/mcp_travel_read_server.py"]),
     ("mcp-order", [PYTHON, "-u", "mcp_server/mcp_order_server.py"]),
-    ("a2a-travel-decision", [PYTHON, "-u", "a2a_server/travel_decision_server.py"]),
-    ("a2a-order", [PYTHON, "-u", "a2a_server/order_server.py"]),
 ]
 
 WEB_SERVICE = ("web-ui", [PYTHON, "-u", "web_app.py"])
@@ -60,8 +58,6 @@ def prepare_log_dir() -> None:
 def log_path_for(name: str) -> Path:
     if name.startswith("mcp-"):
         return LOG_DIR / "mcp.log"
-    if name.startswith("a2a-"):
-        return LOG_DIR / "a2a.log"
     if name.startswith("web-"):
         return LOG_DIR / "web.log"
     return LOG_DIR / f"{name}.log"
@@ -140,7 +136,6 @@ def main() -> int:
 
         print("[launcher] all requested processes started, press Ctrl+C to stop")
         print("[launcher] mcp service output -> logs/mcp.log")
-        print("[launcher] a2a service output -> logs/a2a.log")
         print("[launcher] application logger -> logs/app.log")
         if args.with_web:
             print("[launcher] web frontend output -> logs/web.log")
