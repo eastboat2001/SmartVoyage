@@ -141,6 +141,63 @@ Copy-Item .env.example .env
 - `SMARTVOYAGE_OLLAMA_BASE_URL=http://127.0.0.1:11434`
 - `SMARTVOYAGE_MODEL_NAME=...`
 
+## 分模型灰度建议
+
+当前支持按阶段把低风险结构化任务切到轻模型，失败时自动回退主模型。
+
+### 配置方法
+
+在 `.env` 中新增一组轻模型参数：
+
+```powershell
+SMARTVOYAGE_LIGHT_MODEL_PROVIDER=openai_compatible
+SMARTVOYAGE_LIGHT_MODEL_NAME=qwen-turbo
+SMARTVOYAGE_LIGHT_MODEL_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+SMARTVOYAGE_LIGHT_MODEL_API_KEY=...
+SMARTVOYAGE_LIGHT_MODEL_PHASES=intent_recognition,weather_plan,ticket_plan,order_date_resolution
+```
+
+含义：
+
+- `SMARTVOYAGE_LIGHT_MODEL_NAME` 为空时，系统不会启用轻模型路由
+- `SMARTVOYAGE_LIGHT_MODEL_PHASES` 是逗号分隔的阶段白名单，只有这些阶段会先尝试轻模型
+- 轻模型阶段如果调用失败、结构化输出非法或重试耗尽，会自动回退到主模型
+
+### 当前建议边界
+
+推荐优先下沉：
+
+- `intent_recognition`
+- `weather_plan`
+- `ticket_plan`
+- `order_date_resolution`
+
+暂不建议下沉：
+
+- `decision_plan`
+- `review_decision`
+- `order_operation_extract_cancel_order`
+- `order_operation_extract_change_order`
+- 任何会直接影响下单、退票、改签执行结果的最终判断阶段
+
+### 推荐实验顺序
+
+建议按下面顺序做灰度，每次只新增一个阶段：
+
+1. `intent_recognition`
+2. `weather_plan`
+3. `ticket_plan`
+4. `order_date_resolution`
+5. `order_action_classify`
+
+每轮都应重新跑 LangSmith 基线，关注：
+
+- 是否仍然 `19/19 passed`
+- 总体 `P50 / P95 / P99`
+- `transport_decision` 平均时延
+- `transport_decision` 平均 token
+- 是否出现新的 route / semantic regression
+
 ## 启动
 
 ### 1. 只启动后端服务

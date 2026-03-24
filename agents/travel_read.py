@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any
 
 from mcp import ClientSession
@@ -18,6 +19,14 @@ from utils.resilient_llm import ResilientModelInvoker
 from utils.structured_outputs import TicketQueryPlanResult, TravelReadKindResult, WeatherQueryPlanResult
 from utils.time_utils import get_current_date_str
 from utils.travel_read_context import extract_travel_read_kind, strip_travel_read_kind
+
+
+EXPLICIT_TICKET_NO_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(?:[GDCZTKYLSP]\d{1,4}|[A-Z]{2}\d{3,4})(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+EXPLICIT_DATE_PATTERN = re.compile(r"20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?|\d{1,2}月\d{1,2}日?|\d{1,2}号")
+RELATIVE_DATE_TOKENS = ("今天", "明天", "后天", "大后天", "本周", "下周", "周末", "未来")
 
 
 AGENT_NAME = "TravelReadSubagent"
@@ -127,6 +136,27 @@ class TravelReadSubagent:
         logger.info(f"TravelRead 天气查询计划输出: {result.model_dump()}")
         return result.model_dump()
 
+    @staticmethod
+    def _query_has_explicit_date(query: str) -> bool:
+        normalized = query.strip()
+        if not normalized:
+            return False
+        if EXPLICIT_DATE_PATTERN.search(normalized):
+            return True
+        return any(token in normalized for token in RELATIVE_DATE_TOKENS)
+
+    @staticmethod
+    def _query_has_explicit_transport_no(query: str) -> bool:
+        return bool(EXPLICIT_TICKET_NO_PATTERN.search(query or ""))
+
+    def _normalize_ticket_plan(self, query: str, plan: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(plan)
+        transport_no = str(normalized.get("transport_no", "")).strip()
+        if transport_no and self._query_has_explicit_transport_no(query) and not self._query_has_explicit_date(query):
+            normalized["date_from"] = ""
+            normalized["date_to"] = ""
+        return normalized
+
     def generate_ticket_plan(self, conversation: str, now_override: str = "", metrics: dict[str, Any] | None = None) -> dict:
         query = strip_travel_read_kind(self.latest_query(conversation))
         result = self.invoker.invoke_structured(
@@ -141,8 +171,9 @@ class TravelReadSubagent:
             metrics=metrics,
             phase_name="ticket_plan",
         )
-        logger.info(f"TravelRead 票务查询计划输出: {result.model_dump()}")
-        return result.model_dump()
+        plan = self._normalize_ticket_plan(query, result.model_dump())
+        logger.info(f"TravelRead 票务查询计划输出: {plan}")
+        return plan
 
     def compile_weather_sql(self, plan: dict) -> str:
         city = self._sql_literal(plan["city"].strip())

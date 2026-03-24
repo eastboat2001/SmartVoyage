@@ -9,10 +9,31 @@ from agents.order import classify_order_action
 from agents.supervisor import SmartVoyageSupervisor, UserPreferenceProfile
 from agents.travel_read import TravelReadSubagent
 from config import Config
-from utils.structured_outputs import IntentRecognitionResult, TicketQuerySpec, TransportDecisionPlanResult
+from utils.structured_outputs import IntentRecognitionResult, OrderActionDecisionResult, TicketQuerySpec, TransportDecisionPlanResult
 
 
 class TravelReadFormattingTest(unittest.TestCase):
+    def test_ticket_plan_with_explicit_transport_no_and_no_date_clears_hallucinated_date(self):
+        agent = TravelReadSubagent(Config())
+        plan = agent._normalize_ticket_plan(
+            "查询G5次列车余票",
+            {
+                "status": "ready",
+                "type": "train",
+                "departure_city": "",
+                "arrival_city": "",
+                "date_from": "2026-03-24",
+                "date_to": "2026-03-24",
+                "transport_no": "G5",
+                "ticket_type": "",
+                "limit": 10,
+                "message": "",
+            },
+        )
+        self.assertEqual(plan["transport_no"], "G5")
+        self.assertEqual(plan["date_from"], "")
+        self.assertEqual(plan["date_to"], "")
+
     def test_weather_summary_uses_deterministic_template(self):
         text = TravelReadSubagent.build_weather_summary(
             [
@@ -62,6 +83,20 @@ class TravelReadFormattingTest(unittest.TestCase):
 
 
 class OrderActionOptimizationTest(unittest.TestCase):
+    @patch("agents.order.model_invoker.invoke_structured")
+    def test_order_action_classify_passes_phase_name_for_task_model_routing(self, mock_invoke_structured):
+        mock_invoke_structured.return_value = OrderActionDecisionResult(action="query_orders")
+
+        action = classify_order_action(
+            "User: 当前用户：demo_user\n查询我的订单",
+            "当前用户：demo_user\n查询我的订单",
+            "当前用户：demo_user\n查询我的订单",
+            {},
+        )
+
+        self.assertEqual(action, "query_orders")
+        self.assertEqual(mock_invoke_structured.call_args.kwargs.get("phase_name"), "order_action_classify")
+
     @patch("agents.order.model_invoker.invoke_structured", side_effect=AssertionError("should not call llm"))
     def test_explicit_order_action_bypasses_llm_classification(self, _mock_llm):
         action = classify_order_action(

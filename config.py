@@ -18,6 +18,11 @@ def _first_env(*names: str, default: str = "") -> str:
     return default
 
 
+def _csv_env(*names: str, default: str = "") -> set[str]:
+    raw = _first_env(*names, default=default)
+    return {item.strip() for item in raw.split(',') if item.strip()}
+
+
 class Config:
     _env_notice_shown = False
     _api_key_notice_shown = False
@@ -72,6 +77,32 @@ class Config:
         self.fallback_ollama_base_url = _first_env(
             "SMARTVOYAGE_FALLBACK_OLLAMA_BASE_URL",
             default=self.ollama_base_url,
+        )
+
+        # 轻模型配置
+        self.light_model_provider = _first_env(
+            "SMARTVOYAGE_LIGHT_MODEL_PROVIDER",
+            default=self.provider,
+        ).strip().lower()
+        self.light_model_name = _first_env(
+            "SMARTVOYAGE_LIGHT_MODEL_NAME",
+            default="",
+        )
+        self.light_model_base_url = _first_env(
+            "SMARTVOYAGE_LIGHT_MODEL_BASE_URL",
+            default=self.base_url,
+        )
+        self.light_model_api_key = _first_env(
+            "SMARTVOYAGE_LIGHT_MODEL_API_KEY",
+            default=self.api_key,
+        )
+        self.light_model_ollama_base_url = _first_env(
+            "SMARTVOYAGE_LIGHT_OLLAMA_BASE_URL",
+            default=self.ollama_base_url,
+        )
+        self.light_model_phases = _csv_env(
+            "SMARTVOYAGE_LIGHT_MODEL_PHASES",
+            default="intent_recognition,weather_plan,ticket_plan,order_date_resolution",
         )
 
         # 容错策略
@@ -156,6 +187,12 @@ class Config:
         if self.fallback_provider and self.fallback_provider not in {"openai_compatible", "ollama"}:
             print(
                 f"[Config] 不支持的 fallback provider: {self.fallback_provider}。"
+                "当前仅支持 openai_compatible 或 ollama。"
+            )
+
+        if self.light_model_name and self.light_model_provider not in {"openai_compatible", "ollama"}:
+            print(
+                f"[Config] 不支持的 light model provider: {self.light_model_provider}。"
                 "当前仅支持 openai_compatible 或 ollama。"
             )
 
