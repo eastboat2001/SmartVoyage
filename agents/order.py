@@ -4,6 +4,7 @@ order.py：本地订单子代理，负责交通票务下单、查询我的订单
 import asyncio
 import json
 import re
+from datetime import datetime, timedelta
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -19,6 +20,7 @@ from utils.agent_protocol import LocalAgentRequest, LocalAgentResponse
 from utils.error_utils import format_exception_details
 from main_prompts import SmartVoyagePrompts
 from utils.model_factory import build_order_agent, extract_text_from_agent_result
+from utils.metrics import clone_metrics, create_metrics, ensure_metrics, increment_metric, merge_metrics, track_phase
 from utils.order_action_context import extract_order_action, strip_order_action
 from utils.persistent_checkpointer import PersistentInMemorySaver
 from utils.request_context import ensure_request_id, set_request_id
@@ -50,6 +52,7 @@ AGENT_SKILLS = [
 class OrderWorkflowState(TypedDict, total=False):
     conversation: str
     now_override: str
+    metrics: dict[str, Any]
     latest_query: str
     clean_query: str
     username: str
@@ -82,16 +85,47 @@ def extract_username(conversation: str) -> str:
     return conf.default_username
 
 
-def extract_departure_date(conversation: str) -> str:
+def _fast_normalize_date(query: str, current_date: str) -> str | None:
+    normalized = query.strip()
+    if not normalized:
+        return ""
+
+    base_date = datetime.fromisoformat(current_date)
+    relative_map = {"今天": 0, "明天": 1, "后天": 2}
+    for token, offset in relative_map.items():
+        if token in normalized:
+            return (base_date + timedelta(days=offset)).strftime("%Y-%m-%d")
+
+    full_match = re.search(r"(?P<year>20\d{2})[-/.年](?P<month>\d{1,2})[-/.月](?P<day>\d{1,2})日?", normalized)
+    if full_match:
+        return f"{int(full_match.group('year')):04d}-{int(full_match.group('month')):02d}-{int(full_match.group('day')):02d}"
+
+    month_day_match = re.search(r"(?P<month>\d{1,2})月(?P<day>\d{1,2})日?", normalized)
+    if month_day_match:
+        return f"{base_date.year:04d}-{int(month_day_match.group('month')):02d}-{int(month_day_match.group('day')):02d}"
+
+    if not any(token in normalized for token in ("年", "月", "日", "号", "今天", "明天", "后天")):
+        return ""
+    return None
+
+
+def extract_departure_date(conversation: str, metrics: dict[str, Any] | None = None) -> str:
     query = latest_user_request(conversation)
+    current_date = get_current_date_str(conf)
+    fast_date = _fast_normalize_date(query, current_date)
+    if fast_date is not None:
+        return fast_date
+
     result = model_invoker.invoke_structured(
         SmartVoyagePrompts.date_resolution_prompt(query=query),
         DateResolutionResult,
         {
-            "current_date": get_current_date_str(conf),
+            "current_date": current_date,
             "query": query,
         },
         description="订单查询日期归一化",
+        metrics=metrics,
+        phase_name="order_date_resolution",
     )
     logger.info(f"订单查询日期归一化结果: {result.model_dump()}")
     return result.normalized_date.strip()
@@ -131,14 +165,16 @@ def summarize_conversation(conversation: str, limit: int = 8) -> str:
 
 def classify_order_action(
     conversation: str,
+    raw_query: str,
     query: str,
     pending_context: dict[str, Any],
+    metrics: dict[str, Any] | None = None,
 ) -> Literal["query_orders", "cancel_order", "change_order", "create_order"]:
     pending_action = pending_context.get("action", "")
     if pending_action in {"cancel_order", "change_order"}:
         return pending_action
 
-    explicit_action = extract_order_action(query)
+    explicit_action = extract_order_action(raw_query)
     if explicit_action:
         return explicit_action
 
@@ -151,6 +187,8 @@ def classify_order_action(
             "query": query,
         },
         description="订单动作分类",
+        metrics=metrics,
+        phase_name="order_action_classify",
     )
     logger.info(f"订单动作分类结果: {result.model_dump()}")
     return result.action
@@ -160,7 +198,7 @@ def is_hitl_review_pending(pending_context: dict[str, Any]) -> bool:
     return pending_context.get("action") == "hitl_review" and bool(pending_context.get("thread_id"))
 
 
-def parse_review_decision(query: str, review_payload: dict[str, Any]) -> tuple[Literal["approved", "rejected"] | None, str]:
+def parse_review_decision(query: str, review_payload: dict[str, Any], metrics: dict[str, Any] | None = None) -> tuple[Literal["approved", "rejected"] | None, str]:
     normalized_query = strip_order_action(strip_pending_context(query)).strip()
     result = model_invoker.invoke_structured(
         SmartVoyagePrompts.review_decision_prompt(),
@@ -170,6 +208,8 @@ def parse_review_decision(query: str, review_payload: dict[str, Any]) -> tuple[L
             "query": normalized_query,
         },
         description="审批回复解析",
+        metrics=metrics,
+        phase_name="review_decision",
     )
     logger.info(f"审批回复解析结果: {result.model_dump()}")
     if result.decision == "approved":
@@ -238,7 +278,7 @@ def pending_context_summary(pending_context: dict[str, Any]) -> str:
     return "无" if not pending_context else json.dumps(pending_context, ensure_ascii=False)
 
 
-async def run_order_agent(query: str):
+async def run_order_agent(query: str, metrics: dict[str, Any] | None = None):
     try:
         async with streamablehttp_client("http://127.0.0.1:8003/mcp") as (read, write, _):
             async with ClientSession(read, write) as session:
@@ -248,6 +288,8 @@ async def run_order_agent(query: str):
                     lambda model: build_order_agent(model, tools),
                     {"messages": [{"role": "user", "content": query}]},
                     description="订单 Agent 执行",
+                    metrics=metrics,
+                    phase_name="order_agent",
                 )
                 return {"status": "success", "message": extract_text_from_agent_result(response)}
     except Exception as exc:
@@ -256,7 +298,7 @@ async def run_order_agent(query: str):
         return {"status": "error", "message": f"订单 MCP 调用出错：{error_detail}"}
 
 
-async def query_my_orders(username: str, departure_date: str):
+async def query_my_orders(username: str, departure_date: str, metrics: dict[str, Any] | None = None):
     try:
         async with streamablehttp_client("http://127.0.0.1:8003/mcp") as (read, write, _):
             async with ClientSession(read, write) as session:
@@ -264,7 +306,9 @@ async def query_my_orders(username: str, departure_date: str):
                 params = {"username": username}
                 if departure_date:
                     params["departure_date"] = departure_date
-                result = await session.call_tool("query_user_orders", params)
+                increment_metric(metrics, "tool_call_count")
+                with track_phase(metrics, "query_orders_tool"):
+                    result = await session.call_tool("query_user_orders", params)
                 return result if isinstance(result, str) else result.content[0].text
     except Exception as exc:
         error_detail = format_exception_details(exc)
@@ -272,12 +316,14 @@ async def query_my_orders(username: str, departure_date: str):
         return f"查询订单失败：{error_detail}"
 
 
-async def invoke_order_tool(tool_name: str, params: dict[str, Any]) -> str:
+async def invoke_order_tool(tool_name: str, params: dict[str, Any], metrics: dict[str, Any] | None = None) -> str:
     try:
         async with streamablehttp_client("http://127.0.0.1:8003/mcp") as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                result = await session.call_tool(tool_name, params)
+                increment_metric(metrics, "tool_call_count")
+                with track_phase(metrics, tool_name):
+                    result = await session.call_tool(tool_name, params)
                 return result if isinstance(result, str) else result.content[0].text
     except Exception as exc:
         error_detail = format_exception_details(exc)
@@ -347,6 +393,7 @@ class OrderSubagent:
         conversation: str,
         query: str,
         pending_context: dict[str, Any],
+        metrics: dict[str, Any] | None = None,
     ) -> tuple[dict[str, str], list[str], str, dict[str, Any] | None]:
         current_date = get_current_date_str(conf)
         extraction = model_invoker.invoke_structured(
@@ -360,6 +407,8 @@ class OrderSubagent:
                 "pending_context": pending_context_summary(pending_context),
             },
             description=f"订单操作参数抽取:{action}",
+            metrics=metrics,
+            phase_name=f"order_operation_extract_{action}",
         )
         extraction_data = extraction.model_dump()
         pending_fields = pending_context.get("extracted_fields", {}) if isinstance(pending_context, dict) else {}
@@ -404,17 +453,19 @@ class OrderSubagent:
 
     def _prepare_state(self, state: OrderWorkflowState) -> dict[str, Any]:
         conversation = state["conversation"]
+        metrics = ensure_metrics(state.get("metrics"))
         latest_query = latest_user_request(conversation)
         pending_context = extract_pending_context(latest_query)
         clean_query = strip_order_action(strip_pending_context(latest_query))
         username = extract_username(conversation)
-        action = classify_order_action(conversation, clean_query, pending_context)
+        action = classify_order_action(conversation, latest_query, clean_query, pending_context, metrics)
         next_state: dict[str, Any] = {
             "latest_query": latest_query,
             "clean_query": clean_query,
             "username": username,
             "action": action,
             "pending_context": pending_context,
+            "metrics": metrics,
         }
         if action in {"cancel_order", "change_order"}:
             payload, missing_fields, follow_up_message, pending = self._extract_operation_payload(
@@ -422,6 +473,7 @@ class OrderSubagent:
                 conversation=conversation,
                 query=clean_query,
                 pending_context=pending_context,
+                metrics=metrics,
             )
             next_state["operation_payload"] = payload
             next_state["missing_fields"] = missing_fields
@@ -438,31 +490,40 @@ class OrderSubagent:
         return state["action"]
 
     async def _query_orders_node(self, state: OrderWorkflowState) -> dict[str, Any]:
-        data = await query_my_orders(state["username"], extract_departure_date(state["clean_query"]))
-        return {"final_text": data, "final_state": "completed"}
+        metrics = ensure_metrics(state.get("metrics"))
+        departure_date = extract_departure_date(state["clean_query"], metrics)
+        data = await query_my_orders(state["username"], departure_date, metrics)
+        return {"final_text": data, "final_state": "completed", "metrics": metrics}
 
     async def _cancel_order_node(self, state: OrderWorkflowState) -> dict[str, Any]:
+        metrics = ensure_metrics(state.get("metrics"))
         payload = dict(state["operation_payload"])
         payload["username"] = state["username"]
-        data = await invoke_order_tool("cancel_ticket_order", payload)
-        return {"final_text": data, "final_state": "completed"}
+        data = await invoke_order_tool("cancel_ticket_order", payload, metrics)
+        return {"final_text": data, "final_state": "completed", "metrics": metrics}
 
     async def _change_order_node(self, state: OrderWorkflowState) -> dict[str, Any]:
+        metrics = ensure_metrics(state.get("metrics"))
         payload = dict(state["operation_payload"])
         payload["username"] = state["username"]
-        data = await invoke_order_tool("change_ticket_order", payload)
-        return {"final_text": data, "final_state": "completed"}
+        data = await invoke_order_tool("change_ticket_order", payload, metrics)
+        return {"final_text": data, "final_state": "completed", "metrics": metrics}
 
     async def _lookup_tickets_node(self, state: OrderWorkflowState) -> dict[str, Any]:
-        conversation = with_travel_read_kind(state["conversation"], "ticket")
+        metrics = ensure_metrics(state.get("metrics"))
+        raw_query = latest_user_request(state["conversation"])
+        ticket_query = with_travel_read_kind(strip_order_action(strip_pending_context(raw_query)), "ticket")
         request_id = ensure_request_id()
         ticket_result = self.travel_read_agent.invoke(
             LocalAgentRequest(
-                text=conversation,
+                text=f"User: {ticket_query}",
+                conversation_history=f"User: {ticket_query}",
                 request_id=request_id,
                 now_override=state.get("now_override", ""),
+                metrics=create_metrics(),
             )
         )
+        merge_metrics(metrics, (ticket_result.meta or {}).get("metrics"))
         if ticket_result.state != "completed":
             logger.info(f"余票未查到：{ticket_result.text}")
             final_state: Literal["completed", "failed", "input_required"] = (
@@ -472,6 +533,7 @@ class OrderSubagent:
                 "ticket_task_state": ticket_result.state,
                 "final_text": ticket_result.text,
                 "final_state": final_state,
+                "metrics": metrics,
             }
 
         logger.info(f"余票信息: {ticket_result.text}")
@@ -479,6 +541,7 @@ class OrderSubagent:
             "ticket_task_state": "completed",
             "ticket_result_text": ticket_result.text,
             "ticket_result_data": ticket_result.data or {},
+            "metrics": metrics,
         }
 
     @staticmethod
@@ -555,6 +618,7 @@ class OrderSubagent:
         return state["action"]
 
     async def _create_order_node(self, state: OrderWorkflowState) -> dict[str, Any]:
+        metrics = ensure_metrics(state.get("metrics"))
         username = state["username"]
         conversation = state["conversation"]
         ticket_result = state["ticket_result_text"]
@@ -572,9 +636,9 @@ class OrderSubagent:
                 f"{transport_field}{selected.get('transport_no', '')}，"
                 f"{selected.get('ticket_type', '')}1张。"
             )
-            order_result = await run_order_agent(deterministic_query)
+            order_result = await run_order_agent(deterministic_query, metrics)
         else:
-            order_result = await run_order_agent(f"{conversation}\n当前用户：{username}\n余票信息：{ticket_result}")
+            order_result = await run_order_agent(f"{conversation}\n当前用户：{username}\n余票信息：{ticket_result}", metrics)
         logger.info(f"MCP 返回: {order_result}")
         data = order_result.get("message", "")
         final_state: Literal["completed", "failed", "input_required"] = "completed" if order_result.get("status") == "success" else "failed"
@@ -586,11 +650,13 @@ class OrderSubagent:
                 "kind": "transport_order",
                 "ticket_result": ticket_data,
             },
+            "metrics": metrics,
         }
 
     async def ainvoke(self, request: LocalAgentRequest) -> LocalAgentResponse:
         request_id = request.request_id or ensure_request_id()
         set_request_id(request_id)
+        metrics = ensure_metrics(request.metrics)
         logger.info(f"[{request_id}] 订单域收到对话: {request.text}")
         latest_query = latest_user_request(request.text)
         pending_context = extract_pending_context(latest_query)
@@ -598,14 +664,14 @@ class OrderSubagent:
         if is_hitl_review_pending(pending_context):
             thread_id = pending_context["thread_id"]
             review_payload = pending_context.get("review_payload", {})
-            decision, follow_up_message = parse_review_decision(latest_query, review_payload)
+            decision, follow_up_message = parse_review_decision(latest_query, review_payload, metrics)
             if not decision:
                 return LocalAgentResponse(
                     state="input_required",
                     text=follow_up_message,
                     pending_order_context=pending_context,
                     data={"kind": "hitl_review", "review_payload": review_payload},
-                    meta={"thread_id": thread_id, "review_required": True},
+                    meta={"thread_id": thread_id, "review_required": True, "metrics": clone_metrics(metrics)},
                 )
             result = await self.workflow.ainvoke(
                 Command(resume={"decision": decision}),
@@ -614,7 +680,7 @@ class OrderSubagent:
         else:
             thread_id = request_id
             result = await self.workflow.ainvoke(
-                {"conversation": request.text, "now_override": request.now_override},
+                {"conversation": request.text, "now_override": request.now_override, "metrics": metrics},
                 config={"configurable": {"thread_id": thread_id}},
             )
 
@@ -633,7 +699,7 @@ class OrderSubagent:
                     "resume_intent": interrupt_payload.get("action", "order"),
                 },
                 data={"kind": "hitl_review", "review_payload": interrupt_payload},
-                meta={"thread_id": thread_id, "review_required": True},
+                meta={"thread_id": thread_id, "review_required": True, "metrics": clone_metrics(metrics)},
             )
 
         final_text = result.get("final_text", "订单流程执行失败，请重试。")
@@ -643,9 +709,13 @@ class OrderSubagent:
             text=final_text,
             pending_order_context=result.get("pending_order_context", {}),
             data=result.get("final_data", {}),
-            meta={"kind": "transport_order", "action": result.get("action", ""), "thread_id": thread_id},
+            meta={
+                "kind": "transport_order",
+                "action": result.get("action", ""),
+                "thread_id": thread_id,
+                "metrics": clone_metrics(result.get("metrics", metrics)),
+            },
         )
-
     def invoke(self, request: LocalAgentRequest) -> LocalAgentResponse:
         try:
             return asyncio.run(self.ainvoke(request))

@@ -287,13 +287,4 @@ $env:SMARTVOYAGE_RUN_E2E="1"
 
 当前日志统一携带 `request_id`，用于串联 supervisor、本地 subagent 和 MCP 请求链路。
 
-## 当前边界
 
-当前版本只服务“交通查询与订票”主线。
-
-明确不包含：
-
-- 酒店
-- 景点
-- 多日行程规划
-- 通用旅行产品前端

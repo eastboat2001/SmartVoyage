@@ -111,6 +111,7 @@ def process_chat_turn(session: WebSessionState, prompt: str) -> dict[str, Any]:
         "pending_order_context": pending,
         "hitl_pending": pending.get("action") == "hitl_review",
         "review_payload": review_payload,
+        "metrics": result.get("metrics", {}) or {},
     }
 
 

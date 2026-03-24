@@ -40,6 +40,8 @@ def process_user_input(prompt):
         result = supervisor.process_user_input(prompt, conversation_history, pending_order_context)
         response = result["response"]
         pending_order_context = result.get("pending_order_context", {})
+        if result.get("metrics"):
+            logger.info(f"本轮 metrics: {result['metrics']}")
         if result["routed_agents"]:
             logger.info(f"路由到代理：{result['routed_agents']}")
         conversation_history += f"\nAssistant: {response}"  # 更新历史
@@ -92,4 +94,4 @@ if __name__ == "__main__":
             process_user_input(prompt)
 
     print("\n---")
-    print("Powered by 黑马程序员 | 基于 Supervisor-style Multi-Agent 的旅行助手系统 v3.0")
+    print("基于 Supervisor-style Multi-Agent 的旅行助手系统 v3.0")

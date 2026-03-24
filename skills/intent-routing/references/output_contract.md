@@ -1,3 +1,3 @@
-- 返回结构化字段：`intents`、`user_queries`、`follow_up_message`。
+- 返回结构化字段：`intents`、`user_queries`、`follow_up_message`、`has_explicit_departure_city`、`needs_home_city_follow_up`。
 - 不要添加额外解释。
 - 不要输出 markdown 代码块。

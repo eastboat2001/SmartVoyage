@@ -109,6 +109,28 @@ class Config:
             default=str(PROJECT_ROOT / "data" / "checkpoints" / "transport_order.pkl"),
         )
 
+        # 缓存配置
+        self.cache_enabled = _first_env(
+            "SMARTVOYAGE_CACHE_ENABLED",
+            default="1",
+        ).strip().lower() not in {"0", "false", "no"}
+        self.redis_url = _first_env(
+            "SMARTVOYAGE_REDIS_URL",
+            default="redis://127.0.0.1:6379/0",
+        )
+        self.cache_time_ttl_seconds = max(
+            1,
+            int(_first_env("SMARTVOYAGE_CACHE_TIME_TTL_SECONDS", default="10")),
+        )
+        self.cache_weather_ttl_seconds = max(
+            1,
+            int(_first_env("SMARTVOYAGE_CACHE_WEATHER_TTL_SECONDS", default="600")),
+        )
+        self.cache_ticket_ttl_seconds = max(
+            1,
+            int(_first_env("SMARTVOYAGE_CACHE_TICKET_TTL_SECONDS", default="60")),
+        )
+
         # 日志配置
         self.log_file = _first_env(
             "SMARTVOYAGE_LOG_FILE",

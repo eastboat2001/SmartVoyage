@@ -88,6 +88,7 @@ referencing==0.36.2
 regex==2025.7.31
 requests==2.32.4
 requests-toolbelt==1.0.0
+redis==5.2.1
 rpds-py==0.26.0
 s3transfer==0.13.1
 safetensors==0.5.3

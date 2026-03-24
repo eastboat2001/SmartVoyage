@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from utils.metrics import create_metrics
+
 
 AgentState = Literal["completed", "input_required", "failed"]
 
@@ -13,6 +15,7 @@ class LocalAgentRequest(BaseModel):
     conversation_history: str = ""
     request_id: str = ""
     now_override: str = ""
+    metrics: dict[str, Any] = Field(default_factory=create_metrics)
 
 
 class LocalAgentResponse(BaseModel):

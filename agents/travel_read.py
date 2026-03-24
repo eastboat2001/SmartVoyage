@@ -12,6 +12,7 @@ from create_logger import logger
 from main_prompts import SmartVoyagePrompts
 from utils.agent_protocol import LocalAgentRequest, LocalAgentResponse
 from utils.error_utils import format_exception_details
+from utils.metrics import clone_metrics, create_metrics, ensure_metrics, increment_metric, track_phase
 from utils.request_context import ensure_request_id, set_request_id
 from utils.resilient_llm import ResilientModelInvoker
 from utils.structured_outputs import TicketQueryPlanResult, TravelReadKindResult, WeatherQueryPlanResult
@@ -68,7 +69,7 @@ class TravelReadSubagent:
             return conversation.split("User:", 1)[-1].strip()
         return conversation.strip()
 
-    def infer_kind(self, conversation: str) -> str:
+    def infer_kind(self, conversation: str, metrics: dict[str, Any] | None = None) -> str:
         explicit_kind = extract_travel_read_kind(conversation)
         if explicit_kind:
             return explicit_kind
@@ -81,6 +82,8 @@ class TravelReadSubagent:
                 "query": query,
             },
             description="TravelRead 读取类型分类",
+            metrics=metrics,
+            phase_name="read_kind",
         )
         logger.info(f"TravelRead 读取类型结构化输出: {result.model_dump()}")
         return result.kind
@@ -89,7 +92,25 @@ class TravelReadSubagent:
     def _sql_literal(value: str) -> str:
         return value.replace("'", "''")
 
-    def generate_weather_plan(self, conversation: str, now_override: str = "") -> dict:
+    @staticmethod
+    def _apply_cache_metrics(metrics: dict[str, Any] | None, response: dict[str, Any]) -> None:
+        meta = response.get("meta", {}) if isinstance(response, dict) else {}
+        cache_status = str(meta.get("cache_status", "")).strip().lower()
+        if cache_status == "hit":
+            increment_metric(metrics, "cache_hits")
+        elif cache_status == "miss":
+            increment_metric(metrics, "cache_misses")
+
+    @staticmethod
+    def _tool_meta(tool_name: str, response: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any]:
+        meta = response.get("meta", {}) if isinstance(response, dict) else {}
+        return {
+            "tool": tool_name,
+            "cache_status": meta.get("cache_status", "bypass"),
+            "metrics": clone_metrics(metrics),
+        }
+
+    def generate_weather_plan(self, conversation: str, now_override: str = "", metrics: dict[str, Any] | None = None) -> dict:
         query = strip_travel_read_kind(self.latest_query(conversation))
         result = self.invoker.invoke_structured(
             SmartVoyagePrompts.weather_query_plan_prompt(conversation_history=conversation, query=query),
@@ -100,11 +121,13 @@ class TravelReadSubagent:
                 "current_date": get_current_date_str(self.config, override=now_override),
             },
             description="TravelRead 天气查询计划生成",
+            metrics=metrics,
+            phase_name="weather_plan",
         )
         logger.info(f"TravelRead 天气查询计划输出: {result.model_dump()}")
         return result.model_dump()
 
-    def generate_ticket_plan(self, conversation: str, now_override: str = "") -> dict:
+    def generate_ticket_plan(self, conversation: str, now_override: str = "", metrics: dict[str, Any] | None = None) -> dict:
         query = strip_travel_read_kind(self.latest_query(conversation))
         result = self.invoker.invoke_structured(
             SmartVoyagePrompts.ticket_query_plan_prompt(conversation_history=conversation, query=query),
@@ -115,6 +138,8 @@ class TravelReadSubagent:
                 "current_date": get_current_date_str(self.config, override=now_override),
             },
             description="TravelRead 票务查询计划生成",
+            metrics=metrics,
+            phase_name="ticket_plan",
         )
         logger.info(f"TravelRead 票务查询计划输出: {result.model_dump()}")
         return result.model_dump()
@@ -166,26 +191,56 @@ class TravelReadSubagent:
         )
 
     @staticmethod
-    def format_weather_response(response: dict) -> tuple[str, str, dict]:
+    def _weather_day_line(item: dict[str, Any]) -> str:
+        return (
+            f"{item['fx_date']} {item['text_day']}，{item['temp_min']}-{item['temp_max']}°C，"
+            f"湿度 {item['humidity']}%，风向 {item['wind_dir_day']}，降水 {item['precip']}mm"
+        )
+
+    @classmethod
+    def build_weather_summary(cls, weather_days: list[dict[str, Any]], metrics: dict[str, Any] | None = None) -> str:
+        with track_phase(metrics, "weather_summary"):
+            if not weather_days:
+                return "未找到天气数据，请确认城市和日期。"
+            city = weather_days[0].get("city", "")
+            if len(weather_days) == 1:
+                return f"{city} {cls._weather_day_line(weather_days[0])}。"
+            day_lines = "；".join(cls._weather_day_line(item) for item in weather_days[:3])
+            suffix = f"共 {len(weather_days)} 天，先展示前 {min(len(weather_days), 3)} 天。"
+            return f"{city} 天气：{day_lines}。{suffix}"
+
+    @classmethod
+    def format_weather_response(cls, response: dict, metrics: dict[str, Any] | None = None) -> tuple[str, str, dict]:
         if response.get("status") == "success":
             data = response.get("data", [])
-            response_text = "\n".join(
-                [
-                    f"{d['city']} {d['fx_date']}: {d['text_day']}（夜间 {d['text_night']}），温度 {d['temp_min']}-{d['temp_max']}°C，湿度 {d['humidity']}%，风向 {d['wind_dir_day']}，降水 {d['precip']}mm"
-                    for d in data
-                ]
-            )
+            response_text = cls.build_weather_summary(data, metrics)
             return "completed", response_text, {"kind": "weather", "weather_days": data}
         if response.get("status") == "no_data":
             return "input_required", response.get("message", "未找到天气数据，请确认城市和日期。"), {"kind": "weather", "weather_days": []}
         return "failed", response.get("message", "天气查询失败，请稍后重试。"), {"kind": "weather", "weather_days": []}
 
     @staticmethod
-    def format_ticket_response(response: dict, query_type: str) -> tuple[str, str, dict]:
+    def _format_ticket_line(item: dict[str, Any], query_type: str) -> str:
+        label = "车次" if query_type == "train" else "航班"
+        return (
+            f"{item['departure_time']} {item['departure_city']}到{item['arrival_city']}，{label} {item['transport_no']}，"
+            f"{item['ticket_type']}，{item['price']} 元，余票 {item['remaining_seats']}"
+        )
+
+    @classmethod
+    def build_ticket_summary(cls, tickets: list[dict[str, Any]], query_type: str, metrics: dict[str, Any] | None = None) -> str:
+        with track_phase(metrics, "ticket_summary"):
+            if not tickets:
+                return "未找到票务数据，请确认查询条件。"
+            label = "高铁票" if query_type == "train" else "机票"
+            lines = [f"{idx}. {cls._format_ticket_line(item, query_type)}" for idx, item in enumerate(tickets[:3], 1)]
+            return f"共找到 {len(tickets)} 条{label}，优先展示前 {min(len(tickets), 3)} 条：\n" + "\n".join(lines)
+
+    @classmethod
+    def format_ticket_response(cls, response: dict, query_type: str, metrics: dict[str, Any] | None = None) -> tuple[str, str, dict]:
         if response.get("status") == "success":
             data = response.get("data", [])
-            lines: list[str] = []
-            tickets: list[dict] = []
+            tickets: list[dict[str, Any]] = []
             for item in data:
                 if query_type == "train":
                     tickets.append(
@@ -201,9 +256,6 @@ class TravelReadSubagent:
                             "order_type": "train",
                         }
                     )
-                    lines.append(
-                        f"{item['departure_city']} 到 {item['arrival_city']} {item['departure_time']}: 车次 {item['train_number']}，{item['seat_type']}，票价 {item['price']}元，剩余 {item['remaining_seats']} 张"
-                    )
                 else:
                     tickets.append(
                         {
@@ -218,10 +270,7 @@ class TravelReadSubagent:
                             "order_type": "flight",
                         }
                     )
-                    lines.append(
-                        f"{item['departure_city']} 到 {item['arrival_city']} {item['departure_time']}: 航班 {item['flight_number']}，{item['cabin_type']}，票价 {item['price']}元，剩余 {item['remaining_seats']} 张"
-                    )
-            return "completed", "\n".join(lines) if lines else "无结果。如果需要其他日期，请补充。", {
+            return "completed", cls.build_ticket_summary(tickets, query_type, metrics), {
                 "kind": "ticket",
                 "query_type": query_type,
                 "tickets": tickets,
@@ -251,65 +300,122 @@ class TravelReadSubagent:
         )
         return "completed", text, {"kind": "time", "current_time": data}
 
-    async def ainvoke(self, request: LocalAgentRequest) -> LocalAgentResponse:
-        request_id = request.request_id or ensure_request_id()
-        set_request_id(request_id)
-        logger.info(f"[{request_id}] TravelRead 收到对话: {request.text}")
-        now_override = request.now_override.strip()
-        kind = self.infer_kind(request.text)
-        logger.info(f"[{request_id}] TravelRead 读取类型: {kind}")
-
-        if kind == "time":
-            raw = await call_travel_read_tool(
-                "get_current_time",
-                {"timezone_name": "Asia/Shanghai", "now_override": now_override},
-            )
-            response = json.loads(raw) if isinstance(raw, str) else raw
-            state, text, data = self.format_time_response(response)
-            return LocalAgentResponse(state=state, text=text, data=data, meta={"kind": "time", "tool": "get_current_time"})
-
-        if kind == "weather":
-            plan = self.generate_weather_plan(request.text, now_override=now_override)
-            if plan["status"] == "input_required":
-                return LocalAgentResponse(
-                    state="input_required",
-                    text=plan["message"],
-                    data={"kind": "weather", "weather_days": [], "query_plan": plan},
-                    meta={"kind": "weather", "query_plan": plan},
-                )
-            sql = self.compile_weather_sql(plan)
-            logger.info(f"[{request_id}] TravelRead 天气 SQL 编译结果: {sql}")
-            raw = await call_travel_read_tool("query_weather", {"sql": sql})
-            response = json.loads(raw) if isinstance(raw, str) else raw
-            state, text, data = self.format_weather_response(response)
-            data["query_plan"] = plan
-            return LocalAgentResponse(
-                state=state,
-                text=text,
-                data=data,
-                meta={"kind": "weather", "tool": "query_weather", "query_plan": plan, "sql": sql, "row_count": len(data.get("weather_days", []))},
-            )
-
-        plan = self.generate_ticket_plan(request.text, now_override=now_override)
-        if plan["status"] == "input_required":
-            return LocalAgentResponse(
-                state="input_required",
-                text=plan["message"],
-                data={"kind": "ticket", "query_type": plan.get("type", ""), "tickets": [], "query_plan": plan},
-                meta={"kind": "ticket", "query_plan": plan},
-            )
-        sql = self.compile_ticket_sql(plan)
-        logger.info(f"[{request_id}] TravelRead 票务 SQL 编译结果: {sql}")
-        raw = await call_travel_read_tool("query_tickets", {"sql": sql})
+    async def _run_tool(self, tool_name: str, params: dict[str, Any], *, phase_name: str, metrics: dict[str, Any]) -> dict[str, Any]:
+        increment_metric(metrics, "tool_call_count")
+        with track_phase(metrics, phase_name):
+            raw = await call_travel_read_tool(tool_name, params)
         response = json.loads(raw) if isinstance(raw, str) else raw
-        state, text, data = self.format_ticket_response(response, plan["type"])
+        self._apply_cache_metrics(metrics, response)
+        return response
+
+    async def _execute_weather_plan_async(self, plan: dict[str, Any], *, request_id: str, metrics: dict[str, Any]) -> LocalAgentResponse:
+        sql = self.compile_weather_sql(plan)
+        logger.info(f"[{request_id}] TravelRead 天气 SQL 编译结果: {sql}")
+        response = await self._run_tool("query_weather", {"sql": sql}, phase_name="query_weather", metrics=metrics)
+        state, text, data = self.format_weather_response(response, metrics)
         data["query_plan"] = plan
         return LocalAgentResponse(
             state=state,
             text=text,
             data=data,
-            meta={"kind": "ticket", "tool": "query_tickets", "query_plan": plan, "sql": sql, "row_count": len(data.get("tickets", []))},
+            meta={
+                "kind": "weather",
+                "tool": "query_weather",
+                "query_plan": plan,
+                "sql": sql,
+                "row_count": len(data.get("weather_days", [])),
+                "cache_status": response.get("meta", {}).get("cache_status", "bypass"),
+                "metrics": clone_metrics(metrics),
+            },
         )
+
+    async def _execute_ticket_plan_async(self, plan: dict[str, Any], *, request_id: str, metrics: dict[str, Any]) -> LocalAgentResponse:
+        sql = self.compile_ticket_sql(plan)
+        logger.info(f"[{request_id}] TravelRead 票务 SQL 编译结果: {sql}")
+        response = await self._run_tool("query_tickets", {"sql": sql}, phase_name="query_tickets", metrics=metrics)
+        state, text, data = self.format_ticket_response(response, plan["type"], metrics)
+        data["query_plan"] = plan
+        return LocalAgentResponse(
+            state=state,
+            text=text,
+            data=data,
+            meta={
+                "kind": "ticket",
+                "tool": "query_tickets",
+                "query_plan": plan,
+                "sql": sql,
+                "row_count": len(data.get("tickets", [])),
+                "cache_status": response.get("meta", {}).get("cache_status", "bypass"),
+                "metrics": clone_metrics(metrics),
+            },
+        )
+
+    def execute_ticket_plan(
+        self,
+        plan: dict[str, Any],
+        *,
+        request_id: str = "",
+        metrics: dict[str, Any] | None = None,
+    ) -> LocalAgentResponse:
+        request_metrics = ensure_metrics(metrics)
+        try:
+            return asyncio.run(self._execute_ticket_plan_async(plan, request_id=request_id or ensure_request_id(), metrics=request_metrics))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(self._execute_ticket_plan_async(plan, request_id=request_id or ensure_request_id(), metrics=request_metrics))
+            finally:
+                loop.close()
+
+    async def ainvoke(self, request: LocalAgentRequest) -> LocalAgentResponse:
+        request_id = request.request_id or ensure_request_id()
+        set_request_id(request_id)
+        metrics = ensure_metrics(request.metrics)
+        logger.info(f"[{request_id}] TravelRead 收到对话: {request.text}")
+        now_override = request.now_override.strip()
+        kind = self.infer_kind(request.text, metrics)
+        logger.info(f"[{request_id}] TravelRead 读取类型: {kind}")
+
+        if kind == "time":
+            response = await self._run_tool(
+                "get_current_time",
+                {"timezone_name": "Asia/Shanghai", "now_override": now_override},
+                phase_name="query_time",
+                metrics=metrics,
+            )
+            state, text, data = self.format_time_response(response)
+            return LocalAgentResponse(
+                state=state,
+                text=text,
+                data=data,
+                meta={
+                    "kind": "time",
+                    "tool": "get_current_time",
+                    "cache_status": response.get("meta", {}).get("cache_status", "bypass"),
+                    "metrics": clone_metrics(metrics),
+                },
+            )
+
+        if kind == "weather":
+            plan = self.generate_weather_plan(request.text, now_override=now_override, metrics=metrics)
+            if plan["status"] == "input_required":
+                return LocalAgentResponse(
+                    state="input_required",
+                    text=plan["message"],
+                    data={"kind": "weather", "weather_days": [], "query_plan": plan},
+                    meta={"kind": "weather", "query_plan": plan, "metrics": clone_metrics(metrics)},
+                )
+            return await self._execute_weather_plan_async(plan, request_id=request_id, metrics=metrics)
+
+        plan = self.generate_ticket_plan(request.text, now_override=now_override, metrics=metrics)
+        if plan["status"] == "input_required":
+            return LocalAgentResponse(
+                state="input_required",
+                text=plan["message"],
+                data={"kind": "ticket", "query_type": plan.get("type", ""), "tickets": [], "query_plan": plan},
+                meta={"kind": "ticket", "query_plan": plan, "metrics": clone_metrics(metrics)},
+            )
+        return await self._execute_ticket_plan_async(plan, request_id=request_id, metrics=metrics)
 
     def invoke(self, request: LocalAgentRequest) -> LocalAgentResponse:
         try:

@@ -337,6 +337,7 @@ def run_case(turns: list[str], case_inputs: dict[str, Any] | None = None) -> dic
             "routed_agents": result.get("routed_agents", []),
             "pending_empty": not bool(result.get("pending_order_context")),
             "pending_order_context": result.get("pending_order_context", {}) or {},
+            "metrics": result.get("metrics", {}) or {},
             "db_metrics_before": db_metrics_before,
             "db_metrics_after": db_metrics_after,
         }

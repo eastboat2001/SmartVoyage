@@ -21,6 +21,8 @@ class IntentRecognitionResult(BaseModel):
     intents: list[SupportedIntent] = Field(default_factory=list)
     user_queries: dict[str, str] = Field(default_factory=dict)
     follow_up_message: str = ""
+    has_explicit_departure_city: bool = False
+    needs_home_city_follow_up: bool = False
 
 
 class TravelReadKindResult(BaseModel):
@@ -51,19 +53,38 @@ class AutoOrderIntentResult(BaseModel):
     should_order: bool = False
 
 
+class TicketQuerySpec(BaseModel):
+    type: Literal["train", "flight"]
+    departure_city: str = ""
+    arrival_city: str = ""
+    date_from: str = ""
+    date_to: str = ""
+    transport_no: str = ""
+    ticket_type: str = ""
+    limit: int = 10
+
+    @model_validator(mode="after")
+    def validate_payload(self):
+        if not self.transport_no.strip():
+            if not (self.departure_city.strip() and self.arrival_city.strip() and self.date_from.strip()):
+                raise ValueError("ticket_plan requires route + date_from or transport_no")
+        if self.date_from.strip() and not self.date_to.strip():
+            self.date_to = self.date_from
+        self.limit = min(max(self.limit, 1), 20)
+        return self
+
+
 class TransportDecisionPlanResult(BaseModel):
     transport_mode: Literal["train", "flight"]
     weather_brief: str = ""
     recommendation_reason: str
-    ticket_query: str
+    ticket_plan: TicketQuerySpec
     should_order: bool = False
 
     @model_validator(mode="after")
     def validate_payload(self):
         if not self.recommendation_reason.strip():
             raise ValueError("recommendation_reason is required")
-        if not self.ticket_query.strip():
-            raise ValueError("ticket_query is required")
         return self
 
 

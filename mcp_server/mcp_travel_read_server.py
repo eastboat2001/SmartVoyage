@@ -1,9 +1,11 @@
 """
 mcp_travel_read_server.py：统一只读 MCP 服务器，负责天气、票务与当前时间查询。
 """
+import hashlib
 import json
 import os
 import sys
+import time
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 
@@ -13,6 +15,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import Config
 from create_logger import logger
+from utils.cache import RedisCacheClient
 from utils.db import get_db_connection
 from utils.format import DateEncoder, default_encoder
 from utils.time_utils import get_current_time_payload
@@ -24,8 +27,23 @@ conf = Config()
 class TravelReadService:
     def __init__(self, config: Config):
         self.config = config
+        self.cache = RedisCacheClient(config.cache_enabled, config.redis_url)
 
-    def execute_select(self, sql: str, *, no_data_message: str) -> str:
+    @staticmethod
+    def _hash_sql(sql: str) -> str:
+        return hashlib.sha256(sql.encode("utf-8")).hexdigest()
+
+    def _payload_with_cache_meta(self, payload: dict, cache_status: str) -> str:
+        enriched = dict(payload)
+        enriched["meta"] = {"cache_status": cache_status}
+        return json.dumps(enriched, cls=DateEncoder, ensure_ascii=False)
+
+    def execute_select(self, sql: str, *, no_data_message: str, cache_prefix: str, ttl_seconds: int) -> str:
+        cache_key = f"smartvoyage:travel_read:{cache_prefix}:{self._hash_sql(sql)}"
+        cached = self.cache.get_json(cache_key)
+        if cached is not None:
+            return self._payload_with_cache_meta(cached, "hit")
+
         conn = None
         cursor = None
         try:
@@ -38,23 +56,30 @@ class TravelReadService:
                     if isinstance(value, (date, datetime, timedelta, Decimal)):
                         result[key] = default_encoder(value)
             payload = {"status": "success", "data": results} if results else {"status": "no_data", "message": no_data_message}
-            return json.dumps(payload, cls=DateEncoder, ensure_ascii=False)
+            self.cache.set_json(cache_key, payload, ttl_seconds)
+            return self._payload_with_cache_meta(payload, "miss")
         except Exception as exc:
             logger.error(f"TravelReadTools 查询失败: {exc}")
-            return json.dumps({"status": "error", "message": str(exc)}, ensure_ascii=False)
+            return json.dumps({"status": "error", "message": str(exc), "meta": {"cache_status": "bypass"}}, ensure_ascii=False)
         finally:
             if cursor is not None:
                 cursor.close()
             if conn is not None and conn.is_connected():
                 conn.close()
 
-    @staticmethod
-    def current_time(timezone_name: str = "Asia/Shanghai", now_override: str = "") -> str:
+    def current_time(self, timezone_name: str = "Asia/Shanghai", now_override: str = "") -> str:
+        bucket = now_override.strip() or str(int(time.time() // max(self.config.cache_time_ttl_seconds, 1)))
+        cache_key = f"smartvoyage:travel_read:time:{timezone_name}:{bucket}"
+        cached = self.cache.get_json(cache_key)
+        if cached is not None:
+            return self._payload_with_cache_meta(cached, "hit")
+
         payload = {
             "status": "success",
             "data": get_current_time_payload(conf, timezone_name=timezone_name, override=now_override),
         }
-        return json.dumps(payload, ensure_ascii=False)
+        self.cache.set_json(cache_key, payload, self.config.cache_time_ttl_seconds)
+        return self._payload_with_cache_meta(payload, "miss")
 
 
 def create_travel_read_mcp_server():
@@ -73,7 +98,12 @@ def create_travel_read_mcp_server():
     )
     def query_weather(sql: str) -> str:
         logger.info(f"TravelReadTools 执行天气查询: {sql}")
-        return service.execute_select(sql, no_data_message="未找到天气数据，请确认城市和日期。")
+        return service.execute_select(
+            sql,
+            no_data_message="未找到天气数据，请确认城市和日期。",
+            cache_prefix="weather",
+            ttl_seconds=conf.cache_weather_ttl_seconds,
+        )
 
     @travel_read_mcp.tool(
         name="query_tickets",
@@ -81,7 +111,12 @@ def create_travel_read_mcp_server():
     )
     def query_tickets(sql: str) -> str:
         logger.info(f"TravelReadTools 执行票务查询: {sql}")
-        return service.execute_select(sql, no_data_message="未找到票务数据，请确认查询条件。")
+        return service.execute_select(
+            sql,
+            no_data_message="未找到票务数据，请确认查询条件。",
+            cache_prefix="tickets",
+            ttl_seconds=conf.cache_ticket_ttl_seconds,
+        )
 
     @travel_read_mcp.tool(
         name="get_current_time",
