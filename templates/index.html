@@ -4,82 +4,174 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SmartVoyage Console</title>
+    <meta name="description" content="SmartVoyage 交通出行智能助手 — 基于 AI Agent 的交通查询与订票系统">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}">
 </head>
 <body>
-    <div class="page-shell">
-        <aside class="side-panel">
-            <div class="brand-card">
-                <p class="eyebrow">SmartVoyage</p>
-                <h1>交通出行智能助手</h1>
-                <p class="brand-copy">基于 FastAPI、LangChain、LangGraph 与 MCP 的可调试前端页面。</p>
-                <div class="user-chip">当前演示用户：{{ username }}</div>
+    <!-- ========== Top Navbar ========== -->
+    <nav class="navbar">
+        <div class="navbar-left">
+            <button id="sidebarToggle" class="icon-btn" aria-label="切换侧边栏">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+            </button>
+            <div class="brand-logo">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
+                <span>SmartVoyage</span>
             </div>
+        </div>
+        <div class="navbar-right">
+            <span class="user-badge">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+                {{ username }}
+            </span>
+            <button id="resetBtn" class="icon-btn" title="重置会话">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            </button>
+        </div>
+    </nav>
 
-            <section class="panel-block">
-                <div class="panel-title-row">
-                    <h2>Agent Cards</h2>
-                    <span class="status-pill">在线</span>
+    <!-- ========== Main Layout ========== -->
+    <div class="page-shell">
+        <!-- Sidebar -->
+        <aside id="sidebar" class="side-panel">
+            <div class="sidebar-inner">
+                <!-- Brand Hero -->
+                <div class="brand-card">
+                    <div class="brand-icon">
+                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/></svg>
+                    </div>
+                    <div>
+                        <h1>交通出行智能助手</h1>
+                        <p class="brand-copy">AI 驱动的交通查询、票务预订与智能决策</p>
+                    </div>
                 </div>
-                <div class="agent-list">
-                    {% for agent in agent_cards %}
-                    <article class="agent-card">
-                        <h3>{{ agent.name }}</h3>
-                        <p>{{ agent.description }}</p>
-                        <div class="agent-meta">{{ agent.url }}</div>
-                        <ul>
-                            {% for skill in agent.skills %}
-                            <li>{{ skill.name }}: {{ skill.description }}</li>
+
+                <!-- Agent Cards (Collapsible) -->
+                <section class="panel-block">
+                    <button class="panel-header" data-collapse="agentList">
+                        <div class="panel-header-left">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                            <h2>Agent Cards</h2>
+                        </div>
+                        <span class="status-pill">在线</span>
+                        <svg class="collapse-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    </button>
+                    <div id="agentList" class="panel-body">
+                        <div class="agent-list">
+                            {% for agent in agent_cards %}
+                            <article class="agent-card">
+                                <h3>
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                                    {{ agent.name }}
+                                </h3>
+                                <p>{{ agent.description }}</p>
+                                {% if agent.url %}
+                                <div class="agent-meta">{{ agent.url }}</div>
+                                {% endif %}
+                                {% if agent.skills %}
+                                <ul>
+                                    {% for skill in agent.skills %}
+                                    <li><strong>{{ skill.name }}</strong>: {{ skill.description }}</li>
+                                    {% endfor %}
+                                </ul>
+                                {% endif %}
+                            </article>
                             {% endfor %}
-                        </ul>
-                    </article>
-                    {% endfor %}
-                </div>
-            </section>
+                        </div>
+                    </div>
+                </section>
 
-            <section class="panel-block">
-                <h2>快捷示例</h2>
-                <div class="quick-actions">
-                    <button data-prompt="现在几点">现在几点</button>
-                    <button data-prompt="查询2026-03-21杭州的天气">查天气</button>
-                    <button data-prompt="查询2026-03-21北京到上海的高铁票">查高铁票</button>
-                    <button data-prompt="根据2026-03-21上海的天气，帮我判断从北京去上海坐高铁还是飞机更合适，不要下单">做交通建议</button>
-                    <button data-prompt="查询我的订单">查订单</button>
-                </div>
-            </section>
+                <!-- Quick Actions -->
+                <section class="panel-block">
+                    <div class="panel-header-static">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                        <h2>快捷指令</h2>
+                    </div>
+                    <div class="quick-actions">
+                        <button class="quick-chip" data-prompt="现在几点">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                            现在几点
+                        </button>
+                        <button class="quick-chip" data-prompt="查询2026-03-21杭州的天气">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9z"/></svg>
+                            查天气
+                        </button>
+                        <button class="quick-chip" data-prompt="查询2026-03-21北京到上海的高铁票">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="3" width="15" height="13"/><polygon points="16 8 20 3 20 13 16 8"/></svg>
+                            查高铁票
+                        </button>
+                        <button class="quick-chip" data-prompt="根据2026-03-21上海的天气，帮我判断从北京去上海坐高铁还是飞机更合适，不要下单">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                            交通建议
+                        </button>
+                        <button class="quick-chip" data-prompt="查询我的订单">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                            查订单
+                        </button>
+                    </div>
+                </section>
+            </div>
         </aside>
 
-        <main class="chat-panel">
-            <header class="chat-header">
-                <div>
-                    <p class="eyebrow">Session</p>
-                    <h2>可视化调试会话</h2>
-                </div>
-                <div class="chat-actions">
-                    <button id="resetBtn" class="secondary-btn">重置会话</button>
-                </div>
-            </header>
+        <!-- Sidebar overlay for mobile -->
+        <div id="sidebarOverlay" class="sidebar-overlay"></div>
 
+        <!-- Chat Panel -->
+        <main class="chat-panel">
+            <!-- Welcome / Empty state -->
+            <div id="welcomeState" class="welcome-state">
+                <div class="welcome-icon">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"><path d="M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z"/></svg>
+                </div>
+                <h2>欢迎使用 SmartVoyage</h2>
+                <p>你可以查询时间、天气、票务，也可以发起下单、退票和改签请求。</p>
+                <div class="welcome-chips">
+                    <button class="quick-chip" data-prompt="查询2026-03-21杭州的天气">☁️ 查天气</button>
+                    <button class="quick-chip" data-prompt="查询2026-03-21北京到上海的高铁票">🚄 查高铁票</button>
+                    <button class="quick-chip" data-prompt="查询我的订单">📋 查订单</button>
+                </div>
+            </div>
+
+            <!-- Chat messages -->
             <section id="chatLog" class="chat-log"></section>
 
+            <!-- Route meta info -->
             <section id="routeMeta" class="route-meta"></section>
 
+            <!-- Composer -->
             <footer class="composer">
-                <textarea id="messageInput" placeholder="输入问题，例如：查询2026-03-21北京到上海的高铁票"></textarea>
-                <button id="sendBtn" class="primary-btn">发送</button>
+                <div class="composer-inner">
+                    <textarea id="messageInput" rows="1" placeholder="输入问题，按 Enter 发送…"></textarea>
+                    <button id="sendBtn" class="send-btn" aria-label="发送">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    </button>
+                </div>
             </footer>
         </main>
     </div>
 
+    <!-- ========== HITL Overlay ========== -->
     <div id="hitlOverlay" class="hitl-overlay hidden">
         <div class="hitl-card">
-            <p class="eyebrow">HITL Review</p>
+            <div class="hitl-icon">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            </div>
+            <p class="hitl-eyebrow">HITL Review</p>
             <h3>待审批操作</h3>
             <div id="hitlSummary" class="hitl-summary"></div>
             <p class="hitl-hint">请先处理当前审批。确认或取消后，才能继续提交新的业务请求。</p>
             <div class="hitl-actions">
-                <button id="approveBtn" class="primary-btn">yes，确认执行</button>
-                <button id="rejectBtn" class="secondary-btn">no，取消执行</button>
+                <button id="approveBtn" class="btn btn-primary">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                    确认执行
+                </button>
+                <button id="rejectBtn" class="btn btn-secondary">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    取消执行
+                </button>
             </div>
         </div>
     </div>

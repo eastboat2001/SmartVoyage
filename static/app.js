@@ -1,307 +1,336 @@
-const bootstrap = window.SMARTVOYAGE_BOOTSTRAP || {};
+/* ==========================================================
+   SmartVoyage — 前端交互逻辑
+   ========================================================== */
+(function () {
+    'use strict';
 
-const chatLog = document.getElementById("chatLog");
-const routeMeta = document.getElementById("routeMeta");
-const messageInput = document.getElementById("messageInput");
-const sendBtn = document.getElementById("sendBtn");
-const resetBtn = document.getElementById("resetBtn");
-const hitlOverlay = document.getElementById("hitlOverlay");
-const hitlSummary = document.getElementById("hitlSummary");
-const approveBtn = document.getElementById("approveBtn");
-const rejectBtn = document.getElementById("rejectBtn");
-const quickButtons = Array.from(document.querySelectorAll(".quick-actions button"));
-const defaultApproveLabel = approveBtn.textContent;
-const defaultRejectLabel = rejectBtn.textContent;
+    /* ---------- DOM 引用 ---------- */
+    const $ = (s, root) => (root || document).querySelector(s);
+    const $$ = (s, root) => [...(root || document).querySelectorAll(s)];
 
-const state = {
-    username: bootstrap.username || "demo_user",
-    messages: [],
-    routedAgents: [],
-    intents: [],
-    pendingOrderContext: {},
-    hitlPending: false,
-    reviewPayload: {},
-    busy: false,
-};
+    const pageShell = $('.page-shell');
+    const sidebar = $('#sidebar');
+    const sidebarToggle = $('#sidebarToggle');
+    const sidebarOverlay = $('#sidebarOverlay');
+    const chatLog = $('#chatLog');
+    const input = $('#messageInput');
+    const sendBtn = $('#sendBtn');
+    const resetBtn = $('#resetBtn');
+    const welcomeState = $('#welcomeState');
+    const routeMeta = $('#routeMeta');
+    const hitlOverlay = $('#hitlOverlay');
+    const hitlSummary = $('#hitlSummary');
+    const approveBtn = $('#approveBtn');
+    const rejectBtn = $('#rejectBtn');
 
-function escapeHtml(value) {
-    return String(value)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;");
-}
+    /* ---------- 状态 ---------- */
+    const boot = window.SMARTVOYAGE_BOOTSTRAP || {};
+    let sessionId = boot.sessionId || '';
+    let hitlContext = null;
+    let isSending = false;
 
-function formatRole(role) {
-    return role === "user" ? "用户" : "助手";
-}
+    /* ---------- 工具函数 ---------- */
+    function renderMd(text) {
+        if (!text) return '';
+        return text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+            .replace(/`([^`]+)`/g, '<code>$1</code>')
+            .replace(/\n/g, '<br>');
+    }
 
-function renderMessages() {
-    if (!state.messages.length) {
-        chatLog.innerHTML = `
-            <article class="message assistant">
-                <div class="message-label">助手</div>
-                <div>欢迎使用 SmartVoyage Web。你可以直接查询时间、天气、票务，也可以发起下单、退票和改签请求。</div>
-            </article>
+    function escHtml(s) {
+        return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    }
+
+    function timeNow() {
+        const d = new Date();
+        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    }
+
+    function setLock(locked) {
+        isSending = locked;
+        input.disabled = locked;
+        sendBtn.disabled = locked;
+        $$('.quick-chip').forEach((b) => {
+            b.disabled = locked;
+        });
+    }
+
+    function hasHitlPending(data) {
+        return Boolean(data && data.hitl_pending && data.pending_order_context && data.pending_order_context.action === 'hitl_review');
+    }
+
+    function buildRouteMeta(data) {
+        if (!data) return null;
+        return {
+            intent: Array.isArray(data.intents) && data.intents.length ? data.intents.join(', ') : '',
+            routedAgent: Array.isArray(data.routed_agents) && data.routed_agents.length ? data.routed_agents.join(', ') : '',
+            pending: hasHitlPending(data)
+        };
+    }
+
+    /* ---------- 侧边栏 ---------- */
+    function initSidebar() {
+        if (window.innerWidth <= 1080) {
+            pageShell.classList.add('sidebar-collapsed');
+        }
+    }
+
+    sidebarToggle.addEventListener('click', () => {
+        pageShell.classList.toggle('sidebar-collapsed');
+    });
+
+    sidebarOverlay.addEventListener('click', () => {
+        pageShell.classList.add('sidebar-collapsed');
+    });
+
+    /* ---------- Agent Cards 折叠 ---------- */
+    $$('.panel-header[data-collapse]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            const targetId = btn.getAttribute('data-collapse');
+            const panel = document.getElementById(targetId);
+            if (panel) {
+                panel.classList.toggle('collapsed');
+                const chevron = btn.querySelector('.collapse-chevron');
+                if (chevron) {
+                    chevron.style.transform = panel.classList.contains('collapsed') ? 'rotate(-90deg)' : '';
+                }
+            }
+        });
+    });
+
+    /* ---------- 自适应 Textarea ---------- */
+    function autoResize() {
+        input.style.height = 'auto';
+        input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+    }
+    input.addEventListener('input', autoResize);
+
+    /* ---------- 消息渲染 ---------- */
+    function addMessage(role, content) {
+        if (welcomeState && !welcomeState.classList.contains('hidden')) {
+            welcomeState.classList.add('hidden');
+        }
+
+        const wrap = document.createElement('div');
+        wrap.className = `message ${role}`;
+
+        const isUser = role === 'user';
+        const header = document.createElement('div');
+        header.className = 'message-header';
+        header.innerHTML = `
+            <span class="message-label">${isUser ? '你' : 'SmartVoyage'}</span>
+            <span class="message-time">${timeNow()}</span>
         `;
-        return;
+        wrap.appendChild(header);
+
+        const body = document.createElement('div');
+        body.className = 'message-content';
+        body.innerHTML = isUser ? escHtml(content) : renderMd(content);
+        wrap.appendChild(body);
+
+        if (!isUser) {
+            const copyBtn = document.createElement('button');
+            copyBtn.className = 'message-copy';
+            copyBtn.title = '复制';
+            copyBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+            copyBtn.addEventListener('click', () => {
+                navigator.clipboard.writeText(content).then(() => {
+                    copyBtn.classList.add('copied');
+                    copyBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
+                    setTimeout(() => {
+                        copyBtn.classList.remove('copied');
+                        copyBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+                    }, 2000);
+                });
+            });
+            wrap.appendChild(copyBtn);
+        }
+
+        chatLog.appendChild(wrap);
+        scrollToBottom();
     }
 
-    chatLog.innerHTML = state.messages
-        .map((message) => {
-            const contentClass = message.pending ? "message-content loading" : "message-content";
-            return `
-                <article class="message ${message.role}">
-                    <div class="message-label">${formatRole(message.role)}</div><div class="${contentClass}">${escapeHtml(message.content)}</div>
-                </article>
-            `;
-        })
-        .join("");
-    chatLog.scrollTop = chatLog.scrollHeight;
-}
-
-function renderRouteMeta() {
-    const parts = [];
-    if (state.intents.length) {
-        parts.push(`意图：${state.intents.join(" / ")}`);
-    }
-    if (state.routedAgents.length) {
-        parts.push(`路由：${state.routedAgents.join(" -> ")}`);
-    }
-    if (state.hitlPending) {
-        parts.push("当前状态：待人工审批");
-    }
-    routeMeta.textContent = parts.join(" ｜ ");
-}
-
-function renderHitlSummary() {
-    const payload = state.reviewPayload || {};
-    if (!payload || typeof payload !== "object") {
-        hitlSummary.textContent = "当前有一笔待审批操作，请先确认或取消。";
-        return;
+    function scrollToBottom() {
+        requestAnimationFrame(() => {
+            chatLog.scrollTo({ top: chatLog.scrollHeight, behavior: 'smooth' });
+        });
     }
 
-    const actionMap = {
-        create_order: "下单",
-        cancel_order: "退票",
-        change_order: "改签",
-    };
-    const action = actionMap[payload.action] || "订单操作";
-    const lines = [`动作：${action}`];
-    if (payload.order_type) {
-        lines.push(`类型：${payload.order_type}`);
-    }
-    if (payload.departure_city || payload.arrival_city) {
-        lines.push(`路线：${payload.departure_city || "?"} -> ${payload.arrival_city || "?"}`);
-    }
-    if (payload.departure_date) {
-        lines.push(`日期：${payload.departure_date}`);
-    }
-    if (payload.transport_no) {
-        lines.push(`车次/航班：${payload.transport_no}`);
-    }
-    if (payload.ticket_type) {
-        lines.push(`席位/舱位：${payload.ticket_type}`);
-    }
-    if (payload.quantity) {
-        lines.push(`数量：${payload.quantity}`);
-    }
-    if (payload.new_departure_date) {
-        lines.push(`改后日期：${payload.new_departure_date}`);
-    }
-    if (payload.new_ticket_type) {
-        lines.push(`改后席位：${payload.new_ticket_type}`);
+    /* ---------- 打字指示器 ---------- */
+    function showTyping() {
+        removeTyping();
+        const el = document.createElement('div');
+        el.id = 'typingIndicator';
+        el.className = 'typing-indicator message assistant';
+        el.innerHTML = '<span></span><span></span><span></span>';
+        chatLog.appendChild(el);
+        scrollToBottom();
     }
 
-    hitlSummary.textContent = lines.join("\n");
-}
+    function removeTyping() {
+        const el = document.getElementById('typingIndicator');
+        if (el) el.remove();
+    }
 
-function applyComposerState() {
-    const disabled = state.busy || state.hitlPending;
-    messageInput.disabled = disabled;
-    sendBtn.disabled = disabled;
-    quickButtons.forEach((button) => {
-        button.disabled = disabled;
+    /* ---------- 路由元信息渲染 ---------- */
+    function renderRouteMeta(data) {
+        routeMeta.innerHTML = '';
+        const meta = buildRouteMeta(data);
+        if (!meta) return;
+
+        const pills = [];
+        if (meta.intent) {
+            pills.push(`<span class="route-pill intent">意图 ${escHtml(meta.intent)}</span>`);
+        }
+        if (meta.routedAgent) {
+            pills.push(`<span class="route-pill agent">→ ${escHtml(meta.routedAgent)}</span>`);
+        }
+        if (meta.pending) {
+            pills.push('<span class="route-pill hitl">⏳ 待审批</span>');
+        }
+        routeMeta.innerHTML = pills.join('');
+    }
+
+    /* ---------- HITL 审批 ---------- */
+    function showHitl(ctx) {
+        hitlContext = ctx;
+        const summary = (ctx && ctx.review_payload && ctx.review_payload.summary) || ctx.summary || JSON.stringify(ctx, null, 2);
+        hitlSummary.textContent = summary;
+        hitlOverlay.classList.remove('hidden');
+    }
+
+    function hideHitl() {
+        hitlContext = null;
+        hitlOverlay.classList.add('hidden');
+    }
+
+    async function handleHitl(approved) {
+        if (!hitlContext) return;
+        hideHitl();
+        setLock(true);
+        showTyping();
+
+        try {
+            const res = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: approved ? 'yes' : 'no' })
+            });
+            const data = await res.json();
+            removeTyping();
+
+            if (data.response) addMessage('assistant', data.response);
+            renderRouteMeta(data);
+            if (hasHitlPending(data)) {
+                showHitl(data.pending_order_context);
+            }
+        } catch (err) {
+            removeTyping();
+            addMessage('assistant', '⚠️ 网络异常，请稍后重试。');
+        } finally {
+            setLock(false);
+        }
+    }
+
+    approveBtn.addEventListener('click', () => handleHitl(true));
+    rejectBtn.addEventListener('click', () => handleHitl(false));
+
+    /* ---------- 发送消息 ---------- */
+    async function sendMessage(text) {
+        if (!text.trim() || isSending) return;
+        if (hitlContext) {
+            showHitl(hitlContext);
+            return;
+        }
+
+        addMessage('user', text.trim());
+        input.value = '';
+        autoResize();
+        setLock(true);
+        showTyping();
+
+        try {
+            const res = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: text.trim() })
+            });
+            const data = await res.json();
+            removeTyping();
+
+            if (data.response) addMessage('assistant', data.response);
+            renderRouteMeta(data);
+            if (hasHitlPending(data)) {
+                showHitl(data.pending_order_context);
+            }
+        } catch (err) {
+            removeTyping();
+            addMessage('assistant', '⚠️ 网络异常，请稍后重试。');
+        } finally {
+            setLock(false);
+            input.focus();
+        }
+    }
+
+    /* ---------- 事件绑定 ---------- */
+    sendBtn.addEventListener('click', () => sendMessage(input.value));
+
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage(input.value);
+        }
     });
-    approveBtn.disabled = state.busy || !state.hitlPending;
-    rejectBtn.disabled = state.busy || !state.hitlPending;
-    approveBtn.textContent = state.busy && state.hitlPending ? "处理中..." : defaultApproveLabel;
-    rejectBtn.textContent = state.busy && state.hitlPending ? "请稍候" : defaultRejectLabel;
-    if (state.hitlPending) {
-        messageInput.placeholder = "当前有一笔待审批操作，请先点击 yes 或 no。";
-    } else {
-        messageInput.placeholder = "输入问题，例如：查询2026-03-21北京到上海的高铁票";
-    }
-}
 
-function renderHitlOverlay() {
-    if (state.hitlPending) {
-        renderHitlSummary();
-        hitlOverlay.classList.remove("hidden");
-    } else {
-        hitlOverlay.classList.add("hidden");
-    }
-}
-
-function renderAll() {
-    renderMessages();
-    renderRouteMeta();
-    renderHitlOverlay();
-    applyComposerState();
-}
-
-async function requestJson(url, options = {}) {
-    const response = await fetch(url, {
-        credentials: "same-origin",
-        headers: {
-            "Content-Type": "application/json",
-            ...(options.headers || {}),
-        },
-        ...options,
+    document.addEventListener('click', (e) => {
+        const chip = e.target.closest('.quick-chip');
+        if (chip && !chip.disabled) {
+            const prompt = chip.getAttribute('data-prompt');
+            if (prompt) sendMessage(prompt);
+        }
     });
-    if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-    }
-    return response.json();
-}
 
-function normalizeChatPayload(payload) {
-    state.messages = Array.isArray(payload.messages) ? payload.messages : [];
-    state.routedAgents = Array.isArray(payload.routed_agents) ? payload.routed_agents : [];
-    state.intents = Array.isArray(payload.intents) ? payload.intents : [];
-    state.pendingOrderContext = payload.pending_order_context || {};
-    state.hitlPending = Boolean(payload.hitl_pending);
-    state.reviewPayload = payload.review_payload || {};
-}
-
-async function sendMessage(message) {
-    const trimmed = String(message || "").trim();
-    if (!trimmed || state.busy || state.hitlPending) {
-        return;
-    }
-    const previousMessages = [...state.messages];
-    state.busy = true;
-    state.messages = [
-        ...state.messages,
-        { role: "user", content: trimmed },
-        { role: "assistant", content: "正在处理中...", pending: true },
-    ];
-    messageInput.value = "";
-    renderAll();
-    applyComposerState();
-    try {
-        const payload = await requestJson("/api/chat", {
-            method: "POST",
-            body: JSON.stringify({ message: trimmed }),
-        });
-        normalizeChatPayload(payload);
-        renderAll();
-    } catch (error) {
-        state.messages = [
-            ...previousMessages,
-            { role: "user", content: trimmed },
-            { role: "assistant", content: `页面请求失败：${error.message}。请检查后端服务和日志。` },
-        ];
-        renderAll();
-    } finally {
-        state.busy = false;
-        applyComposerState();
-    }
-}
-
-async function resolveHitl(decision) {
-    if (!state.hitlPending || state.busy) {
-        return;
-    }
-    state.busy = true;
-    applyComposerState();
-    try {
-        const payload = await requestJson("/api/chat", {
-            method: "POST",
-            body: JSON.stringify({ message: decision }),
-        });
-        normalizeChatPayload(payload);
-        renderAll();
-    } catch (error) {
-        state.messages.push({
-            role: "assistant",
-            content: `审批请求失败：${error.message}。请重试，或查看 logs/app.log 与 logs/a2a.log。`,
-        });
-        renderAll();
-    } finally {
-        state.busy = false;
-        applyComposerState();
-    }
-}
-
-async function bootstrapSession() {
-    state.busy = true;
-    applyComposerState();
-    try {
-        const payload = await requestJson("/api/bootstrap", { method: "GET" });
-        normalizeChatPayload(payload);
-    } catch (error) {
-        state.messages = [
-            {
-                role: "assistant",
-                content: `初始化页面失败：${error.message}。请确认 web_app.py 已启动。`,
-            },
-        ];
-    } finally {
-        state.busy = false;
-        renderAll();
-    }
-}
-
-sendBtn.addEventListener("click", () => {
-    void sendMessage(messageInput.value);
-});
-
-messageInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-        event.preventDefault();
-        void sendMessage(messageInput.value);
-    }
-});
-
-resetBtn.addEventListener("click", async () => {
-    if (state.busy) {
-        return;
-    }
-    state.busy = true;
-    applyComposerState();
-    try {
-        await requestJson("/api/reset", { method: "POST", body: "{}" });
-        state.messages = [];
-        state.routedAgents = [];
-        state.intents = [];
-        state.pendingOrderContext = {};
-        state.hitlPending = false;
-        state.reviewPayload = {};
-        renderAll();
-    } catch (error) {
-        state.messages.push({
-            role: "assistant",
-            content: `重置会话失败：${error.message}。`,
-        });
-        renderAll();
-    } finally {
-        state.busy = false;
-        applyComposerState();
-    }
-});
-
-quickButtons.forEach((button) => {
-    button.addEventListener("click", () => {
-        void sendMessage(button.dataset.prompt || "");
+    resetBtn.addEventListener('click', async () => {
+        try {
+            await fetch('/api/reset', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+        } catch (e) {
+            // ignore reset transport failure and still clear UI
+        }
+        chatLog.innerHTML = '';
+        routeMeta.innerHTML = '';
+        hideHitl();
+        if (welcomeState) welcomeState.classList.remove('hidden');
     });
-});
 
-approveBtn.addEventListener("click", () => {
-    void resolveHitl("yes");
-});
+    /* ---------- Bootstrap ---------- */
+    async function bootstrap() {
+        try {
+            const res = await fetch('/api/bootstrap');
+            const data = await res.json();
 
-rejectBtn.addEventListener("click", () => {
-    void resolveHitl("no");
-});
+            if (Array.isArray(data.messages) && data.messages.length) {
+                data.messages.forEach((msg) => addMessage(msg.role, msg.content));
+            }
+            renderRouteMeta(data);
+            if (hasHitlPending(data)) {
+                showHitl(data.pending_order_context);
+            }
+        } catch {
+            // bootstrap failure should not block initial render
+        }
+    }
 
-void bootstrapSession();
+    /* ---------- 初始化 ---------- */
+    initSidebar();
+    bootstrap();
+})();
