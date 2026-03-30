@@ -1,10 +1,16 @@
+"""
+功能：验证 Skill Runtime 当前暴露的 capability 与 Prompt builder 一致。
+作用：防止 skill 清理或重构后留下失效入口。
+实现方式：通过 unittest 检查 role-capability 组合和上下文引用装配结果。
+"""
+
 import os
 import sys
 import unittest
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from main_prompts import SmartVoyagePrompts
+from core.prompts import SmartVoyagePrompts
 from skills.runtime import SkillBuildContext, skill_runtime
 
 
@@ -12,14 +18,10 @@ class PromptSkillRegistryTest(unittest.TestCase):
     def test_skill_registry_discovers_all_known_role_capability_pairs(self):
         required = [
             ("supervisor", "intent_recognition"),
-            ("supervisor", "travel_query_context"),
             ("travel_read", "read_kind"),
-            ("travel_read", "weather_summary"),
-            ("travel_read", "ticket_summary"),
             ("travel_read", "weather_plan"),
             ("travel_read", "ticket_plan"),
             ("supervisor", "decision_plan"),
-            ("supervisor", "auto_order"),
             ("order", "action_classify"),
             ("order", "review_decision"),
             ("order", "date_resolution"),
@@ -42,20 +44,16 @@ class PromptSkillRegistryTest(unittest.TestCase):
                 )
                 self.assertTrue(rendered.strip())
 
-    def test_main_prompts_facade_still_exposes_current_entrypoints(self):
+    def test_prompt_builders_expose_current_entrypoints(self):
         builders = [
             SmartVoyagePrompts.intent_prompt,
-            SmartVoyagePrompts.summarize_weather_prompt,
-            SmartVoyagePrompts.summarize_ticket_prompt,
             SmartVoyagePrompts.travel_read_kind_prompt,
-            SmartVoyagePrompts.travel_query_context_prompt,
             SmartVoyagePrompts.transport_decision_prompt,
             SmartVoyagePrompts.order_action_prompt,
             SmartVoyagePrompts.review_decision_prompt,
             SmartVoyagePrompts.date_resolution_prompt,
             SmartVoyagePrompts.weather_query_plan_prompt,
             SmartVoyagePrompts.ticket_query_plan_prompt,
-            SmartVoyagePrompts.auto_order_intent_prompt,
             SmartVoyagePrompts.order_operation_extraction_prompt,
         ]
 

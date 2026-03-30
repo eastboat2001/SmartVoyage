@@ -1,3 +1,9 @@
+"""
+功能：实现 SmartVoyage 的主编排器 Supervisor。
+作用：负责意图识别、跨域路由、transport_decision 复合流程和 metrics 聚合。
+实现方式：结合结构化 LLM 调用、本地子代理调用和显式流程控制完成编排。
+"""
+
 from __future__ import annotations
 
 import json
@@ -10,18 +16,18 @@ from typing_extensions import TypedDict
 
 from agents.order import OrderSubagent
 from agents.travel_read import TravelReadSubagent
-from config import Config
-from create_logger import logger
-from main_prompts import SmartVoyagePrompts
-from utils.agent_protocol import LocalAgentRequest
-from utils.db import get_db_connection
-from utils.metrics import clone_metrics, create_metrics, merge_metrics
-from utils.request_context import clear_request_id, ensure_request_id
-from utils.resilient_llm import ResilientModelInvoker
-from utils.order_action_context import with_order_action
-from utils.structured_outputs import IntentRecognitionResult, TravelQueryContextResult, TransportDecisionPlanResult
-from utils.time_utils import get_current_date_str
-from utils.travel_read_context import extract_travel_read_kind, strip_travel_read_kind, with_travel_read_kind
+from core.config import Config
+from core.logging import logger
+from core.prompts import SmartVoyagePrompts
+from contracts.agent_protocol import LocalAgentRequest
+from infra.db import get_db_connection
+from observability.metrics import clone_metrics, create_metrics, merge_metrics
+from observability.request_context import clear_request_id, ensure_request_id
+from llm.resilient_llm import ResilientModelInvoker
+from contracts.order_action_tag import with_order_action
+from contracts.structured_outputs import IntentRecognitionResult, TransportDecisionPlanResult
+from core.clock import get_current_date_str
+from contracts.travel_read_tag import extract_travel_read_kind, strip_travel_read_kind, with_travel_read_kind
 
 EXPLICIT_TRANSPORT_NO_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?:[GDCZTKYLSP]\d{1,4}|[A-Z]{2}\d{3,4})(?![A-Za-z0-9])",
@@ -234,18 +240,6 @@ class SmartVoyageSupervisor:
         candidate_texts.extend(result.user_queries.values())
         if any(self._has_explicit_transport_no(text) for text in candidate_texts):
             result.needs_home_city_follow_up = False
-
-    def _analyze_travel_query_context(self, query: str) -> TravelQueryContextResult:
-        result = self.invoker.invoke_structured(
-            SmartVoyagePrompts.travel_query_context_prompt(),
-            TravelQueryContextResult,
-            {
-                "query": query,
-            },
-            description="交通查询上下文分析",
-        )
-        logger.info(f"交通查询上下文分析结果: {result.model_dump()}")
-        return result
 
     def process_user_input(
         self,
@@ -594,21 +588,6 @@ class SmartVoyageSupervisor:
         return (
             f"你这次是从{user_profile.home_city}出发吗？"
             f"如果按你的常住地{user_profile.home_city}出发，我可以继续帮你查票或做出行建议。"
-        )
-
-    def _precheck_home_city_follow_up(self, prompt: str, user_profile: UserPreferenceProfile) -> str:
-        if not user_profile.home_city:
-            return ""
-        normalized = prompt.strip()
-        if not normalized:
-            return ""
-        context = self._analyze_travel_query_context(normalized)
-        if not context.needs_home_city_follow_up:
-            return ""
-        return (
-            f"你这次是从{user_profile.home_city}出发吗？"
-            f"如果按你的常住地{user_profile.home_city}出发，我可以继续帮你查高铁票和机票；"
-            "如果不是，请直接告诉我出发城市。"
         )
 
     def _finalize_agent_response(

@@ -1,3 +1,9 @@
+"""
+功能：验证 TravelRead MCP 服务的工具接口。
+作用：确保时间、天气和票务工具在独立服务层能正常返回。
+实现方式：启动或连接 MCP 服务后执行工具调用并断言结果。
+"""
+
 import asyncio
 import json
 import os

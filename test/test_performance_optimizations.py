@@ -1,3 +1,9 @@
+"""
+功能：验证性能优化相关逻辑没有破坏主流程语义。
+作用：覆盖 deterministic formatting、旧兼容路径删除和关键优化约束。
+实现方式：通过单测对优化后函数输出和编排分支进行断言。
+"""
+
 import os
 import sys
 import unittest
@@ -8,8 +14,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents.order import classify_order_action
 from agents.supervisor import SmartVoyageSupervisor, UserPreferenceProfile
 from agents.travel_read import TravelReadSubagent
-from config import Config
-from utils.structured_outputs import IntentRecognitionResult, OrderActionDecisionResult, TicketQuerySpec, TransportDecisionPlanResult
+from core.config import Config
+from contracts.structured_outputs import IntentRecognitionResult, OrderActionDecisionResult, TicketQuerySpec, TransportDecisionPlanResult
 
 
 class TravelReadFormattingTest(unittest.TestCase):
@@ -110,12 +116,10 @@ class OrderActionOptimizationTest(unittest.TestCase):
 
 class SupervisorOptimizationTest(unittest.TestCase):
     @patch.object(SmartVoyageSupervisor, "_load_user_preferences", return_value=UserPreferenceProfile(username="demo_user"))
-    @patch.object(SmartVoyageSupervisor, "_analyze_travel_query_context", side_effect=AssertionError("should not call travel_query_context"))
     @patch.object(SmartVoyageSupervisor, "_call_agent")
-    def test_process_user_input_skips_travel_query_context_llm_when_intent_has_signal(
+    def test_process_user_input_routes_without_legacy_travel_query_context_step(
         self,
         mock_call_agent,
-        _mock_query_context,
         _mock_user_profile,
     ):
         supervisor = SmartVoyageSupervisor(Config())

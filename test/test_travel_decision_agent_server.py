@@ -1,3 +1,9 @@
+"""
+功能：验证 transport_decision 链路的服务侧行为。
+作用：确保复合查询与决策流程在服务协议层保持稳定。
+实现方式：通过异步 mock 和请求对象断言 agent 服务响应。
+"""
+
 import json
 import os
 import sys
@@ -7,8 +13,8 @@ from unittest.mock import AsyncMock, patch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agents.travel_read import TravelReadSubagent
-from config import Config
-from utils.agent_protocol import LocalAgentRequest
+from core.config import Config
+from contracts.agent_protocol import LocalAgentRequest
 
 
 class TravelReadSubagentSmokeTest(unittest.TestCase):

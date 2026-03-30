@@ -1,3 +1,9 @@
+"""
+功能：提供 SmartVoyage 的 Web 交互入口和会话管理。
+作用：把 Supervisor 暴露给浏览器端，支持多轮对话、HITL 展示和 metrics 返回。
+实现方式：使用 FastAPI + 模板渲染维护会话状态，并将每轮请求转发给编排层。
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -13,9 +19,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-from config import Config
-from create_logger import logger
-from utils.fastapi_middleware import install_common_middleware
+from core.config import Config
+from core.logging import logger
+from core.http import install_common_middleware
 from agents.supervisor import SmartVoyageSupervisor
 
 

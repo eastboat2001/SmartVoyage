@@ -1,3 +1,9 @@
+"""
+功能：实现本地 Skill Runtime。
+作用：按 role、capability 和 flags 在运行时选择合适的 skill 资产。
+实现方式：加载 skill manifest，解析条件引用，并向上层返回可格式化 Prompt 模板。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -8,7 +14,7 @@ from typing import Any
 import yaml
 from langchain_core.prompts import ChatPromptTemplate
 
-from create_logger import logger
+from core.logging import logger
 from skills.builder import PromptBuildError, PromptSkillBuilder
 
 

@@ -1,3 +1,9 @@
+"""
+功能：运行 LangSmith 回归评测并汇总性能与正确性指标。
+作用：验证项目优化是否在不回归功能的前提下降低时延和 Token。
+实现方式：装载评测用例、调用主链路、记录结果并生成聚合统计。
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -24,11 +30,11 @@ CASES_PATH = Path(__file__).with_name("cases.json")
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from config import Config  # noqa: E402
+from core.config import Config  # noqa: E402
 sys.path.insert(0, str(ROOT / "mcp_server"))
 from mcp_order_server import OrderService  # noqa: E402
 from agents.supervisor import SmartVoyageSupervisor  # noqa: E402
-from utils.resilient_llm import ResilientModelInvoker  # noqa: E402
+from llm.resilient_llm import ResilientModelInvoker  # noqa: E402
 
 
 DEFAULT_DATASET_NAME = "SmartVoyage Regression"

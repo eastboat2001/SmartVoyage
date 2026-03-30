@@ -1,5 +1,11 @@
-from config import Config
-from create_logger import logger
+"""
+功能：提供命令行交互入口，驱动 Supervisor 处理用户输入。
+作用：用于本地手工调试完整对话链路和订单补槽流程。
+实现方式：初始化配置与编排器，在循环中读取输入并打印结构化结果。
+"""
+
+from core.config import Config
+from core.logging import logger
 from agents.supervisor import SmartVoyageSupervisor
 
 conf = Config()

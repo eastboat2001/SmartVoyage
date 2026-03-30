@@ -1,3 +1,9 @@
+"""
+功能：验证 TravelRead 只读缓存逻辑。
+作用：确保 Redis 命中、未命中和降级路径按预期工作。
+实现方式：通过 mock 缓存客户端和服务返回值检查缓存分支。
+"""
+
 import json
 import os
 import sys
@@ -8,7 +14,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT)
 sys.path.append(os.path.join(ROOT, "mcp_server"))
 
-from config import Config
+from core.config import Config
 from mcp_travel_read_server import TravelReadService
 
 

@@ -1,3 +1,9 @@
+"""
+功能：验证 Order MCP 服务的工具接口与订单事务行为。
+作用：确保下单、查单、退票和改签工具在服务层可用。
+实现方式：启动或连接 MCP 服务，执行真实工具调用并校验结果。
+"""
+
 import asyncio
 import json
 import os

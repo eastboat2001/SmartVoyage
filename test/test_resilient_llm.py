@@ -1,3 +1,9 @@
+"""
+功能：验证 ResilientModelInvoker 的重试与结果校验逻辑。
+作用：确保结构化模型调用失败时会按预期重试与恢复。
+实现方式：使用 mock 链和补丁模型模拟失败与成功分支。
+"""
+
 import os
 import sys
 import unittest
@@ -5,8 +11,8 @@ from unittest.mock import patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import Config
-from utils.resilient_llm import ResilientModelInvoker
+from core.config import Config
+from llm.resilient_llm import ResilientModelInvoker
 
 
 class _DummyChain:
@@ -26,9 +32,10 @@ class _SchemaLikeResult:
 
 
 class ResilientModelInvokerTest(unittest.TestCase):
-    @patch('utils.resilient_llm.ResilientModelInvoker._build_fallback_model', return_value=None)
-    @patch('utils.resilient_llm.build_chat_model', return_value=object())
-    def test_invoke_with_models_retries_on_invalid_structured_result(self, _mock_model, _mock_fallback):
+    @patch('llm.resilient_llm.ResilientModelInvoker._build_light_model_spec', return_value=None)
+    @patch('llm.resilient_llm.ResilientModelInvoker._build_fallback_model_spec', return_value=None)
+    @patch('llm.resilient_llm.build_chat_model', return_value=object())
+    def test_invoke_with_models_retries_on_invalid_structured_result(self, _mock_model, _mock_fallback, _mock_light):
         invoker = ResilientModelInvoker(Config())
         results = [None, _SchemaLikeResult()]
 

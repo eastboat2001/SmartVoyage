@@ -1,6 +1,9 @@
 """
-order.py：本地订单子代理，负责交通票务下单、查询我的订单、退票与改签。
+功能：实现 OrderSubagent，处理下单、查单、退票和改签。
+作用：承接有副作用的事务型任务，并统一处理补槽、审批和恢复。
+实现方式：结合结构化抽取、LangGraph 状态机、MCP 工具和 checkpoint 完成订单工作流。
 """
+
 import asyncio
 import json
 import re
@@ -14,20 +17,20 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from typing_extensions import Literal, TypedDict
 
-from config import Config
-from create_logger import logger
-from utils.agent_protocol import LocalAgentRequest, LocalAgentResponse
-from utils.error_utils import format_exception_details
-from main_prompts import SmartVoyagePrompts
-from utils.model_factory import build_order_agent, extract_text_from_agent_result
-from utils.metrics import clone_metrics, create_metrics, ensure_metrics, increment_metric, merge_metrics, track_phase
-from utils.order_action_context import extract_order_action, strip_order_action
-from utils.persistent_checkpointer import PersistentInMemorySaver
-from utils.request_context import ensure_request_id, set_request_id
-from utils.resilient_llm import ResilientModelInvoker
-from utils.structured_outputs import DateResolutionResult, OrderActionDecisionResult, OrderOperationExtractionResult, ReviewDecisionResult
-from utils.time_utils import get_current_date_str
-from utils.travel_read_context import with_travel_read_kind
+from core.config import Config
+from core.logging import logger
+from contracts.agent_protocol import LocalAgentRequest, LocalAgentResponse
+from core.errors import format_exception_details
+from core.prompts import SmartVoyagePrompts
+from llm.model_factory import build_order_agent, extract_text_from_agent_result
+from observability.metrics import clone_metrics, create_metrics, ensure_metrics, increment_metric, merge_metrics, track_phase
+from contracts.order_action_tag import extract_order_action, strip_order_action
+from infra.persistent_checkpointer import PersistentInMemorySaver
+from observability.request_context import ensure_request_id, set_request_id
+from llm.resilient_llm import ResilientModelInvoker
+from contracts.structured_outputs import DateResolutionResult, OrderActionDecisionResult, OrderOperationExtractionResult, ReviewDecisionResult
+from core.clock import get_current_date_str
+from contracts.travel_read_tag import with_travel_read_kind
 
 
 conf = Config()

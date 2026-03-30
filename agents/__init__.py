@@ -1,1 +1,6 @@
-"""SmartVoyage local supervisor and subagents."""
+"""
+功能：标记本地 agent 包。
+作用：集中承载 Supervisor、只读子代理和订单子代理实现。
+实现方式：保持轻量包说明，实际逻辑位于各 agent 模块。
+"""
+

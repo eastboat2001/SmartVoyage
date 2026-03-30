@@ -1,3 +1,9 @@
+"""
+功能：实现 TravelReadSubagent，只处理时间、天气和票务只读请求。
+作用：把低风险查询链路与订单事务链路解耦，并承接缓存和 deterministic 输出优化。
+实现方式：先做 read kind 与 query plan 解析，再调用 TravelRead MCP 并按模板格式化结果。
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -8,17 +14,17 @@ from typing import Any
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-from config import Config
-from create_logger import logger
-from main_prompts import SmartVoyagePrompts
-from utils.agent_protocol import LocalAgentRequest, LocalAgentResponse
-from utils.error_utils import format_exception_details
-from utils.metrics import clone_metrics, create_metrics, ensure_metrics, increment_metric, track_phase
-from utils.request_context import ensure_request_id, set_request_id
-from utils.resilient_llm import ResilientModelInvoker
-from utils.structured_outputs import TicketQueryPlanResult, TravelReadKindResult, WeatherQueryPlanResult
-from utils.time_utils import get_current_date_str
-from utils.travel_read_context import extract_travel_read_kind, strip_travel_read_kind
+from core.config import Config
+from core.logging import logger
+from core.prompts import SmartVoyagePrompts
+from contracts.agent_protocol import LocalAgentRequest, LocalAgentResponse
+from core.errors import format_exception_details
+from observability.metrics import clone_metrics, create_metrics, ensure_metrics, increment_metric, track_phase
+from observability.request_context import ensure_request_id, set_request_id
+from llm.resilient_llm import ResilientModelInvoker
+from contracts.structured_outputs import TicketQueryPlanResult, TravelReadKindResult, WeatherQueryPlanResult
+from core.clock import get_current_date_str
+from contracts.travel_read_tag import extract_travel_read_kind, strip_travel_read_kind
 
 
 EXPLICIT_TICKET_NO_PATTERN = re.compile(

@@ -1,3 +1,9 @@
+"""
+功能：验证 Supervisor 的核心路由与上下文处理行为。
+作用：防止意图识别、子代理调用和补问策略在重构后回归。
+实现方式：通过 mock 子代理和结构化输出检查主编排分支。
+"""
+
 import os
 import sys
 import unittest
@@ -6,8 +12,8 @@ from unittest.mock import patch
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agents.supervisor import AgentExecutionResult, SmartVoyageSupervisor, UserPreferenceProfile
-from config import Config
-from utils.structured_outputs import IntentRecognitionResult
+from core.config import Config
+from contracts.structured_outputs import IntentRecognitionResult
 
 
 class SupervisorSmokeTest(unittest.TestCase):

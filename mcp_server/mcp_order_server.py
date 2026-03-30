@@ -1,12 +1,9 @@
 """
-mcp_order_server.py：交通票务订单 MCP 服务器，负责火车票和机票预定，以及订单生命周期管理。
-
-核心功能：
-    火车票预定、飞机票预定。
-    查询用户订单。
-    防重复下单与库存扣减。
-    退票、改签、订单状态流转。
+功能：实现 Order MCP 服务，提供订单创建、查询、取消和改签工具。
+作用：作为事务型工具边界，把订单与库存操作从 agent 编排层隔离出来。
+实现方式：基于 FastMCP 暴露订单相关工具，并在工具内部执行数据库读写与校验。
 """
+
 import json
 import os
 import sys
@@ -16,9 +13,9 @@ from mcp.server.fastmcp import FastMCP
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import Config
-from create_logger import logger
-from utils.db import get_db_connection
+from core.config import Config
+from core.logging import logger
+from infra.db import get_db_connection
 
 conf = Config()
 

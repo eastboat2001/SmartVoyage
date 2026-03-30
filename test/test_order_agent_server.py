@@ -1,3 +1,9 @@
+"""
+功能：验证 OrderSubagent 的服务入口行为。
+作用：确保订单请求协议、响应状态和补槽流程稳定。
+实现方式：通过 unittest 调用子代理入口并断言结构化响应。
+"""
+
 import os
 import sys
 import unittest
@@ -6,8 +12,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agents.order import OrderSubagent
 from agents.travel_read import TravelReadSubagent
-from config import Config
-from utils.agent_protocol import LocalAgentRequest
+from core.config import Config
+from contracts.agent_protocol import LocalAgentRequest
 
 
 class _FakeWorkflow:

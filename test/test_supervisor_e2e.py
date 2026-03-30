@@ -1,3 +1,9 @@
+"""
+功能：执行 Supervisor 相关的端到端集成验证。
+作用：从进程和接口层确认编排链路在真实运行环境中可用。
+实现方式：启动相关服务后发起真实请求并断言返回内容。
+"""
+
 import os
 import subprocess
 import sys
@@ -8,7 +14,7 @@ from pathlib import Path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agents.supervisor import SmartVoyageSupervisor
-from config import Config
+from core.config import Config
 
 
 ROOT = Path(__file__).resolve().parents[1]

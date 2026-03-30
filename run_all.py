@@ -1,3 +1,9 @@
+"""
+功能：统一启动 MCP 服务、CLI 和 Web 入口。
+作用：简化本地联调，避免分别手动启动多个进程。
+实现方式：通过子进程管理 MCP 服务与可选前端入口，并处理退出信号。
+"""
+
 import argparse
 import os
 import signal

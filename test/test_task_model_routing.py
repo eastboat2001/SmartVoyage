@@ -1,3 +1,9 @@
+"""
+功能：验证按阶段轻重模型路由与 fallback 行为。
+作用：确保分模型优化策略命中正确阶段且失败时能回退。
+实现方式：通过 patch 模型工厂和调用器检查模型选择顺序。
+"""
+
 import os
 import sys
 import unittest
@@ -5,8 +11,8 @@ from unittest.mock import patch
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import Config
-from utils.resilient_llm import ResilientModelInvoker
+from core.config import Config
+from llm.resilient_llm import ResilientModelInvoker
 
 
 class _DummySchema:
@@ -53,7 +59,7 @@ class TaskModelRoutingTest(unittest.TestCase):
         os.environ.clear()
         os.environ.update(self.env_backup)
 
-    @patch('utils.resilient_llm.build_chat_model')
+    @patch('llm.resilient_llm.build_chat_model')
     def test_iter_models_prefers_light_for_whitelisted_phase(self, mock_build_chat_model):
         models = {
             'primary-model': object(),
@@ -70,7 +76,7 @@ class TaskModelRoutingTest(unittest.TestCase):
         self.assertEqual(labels, ['light', 'primary', 'fallback'])
         self.assertEqual(non_light_labels, ['primary', 'fallback'])
 
-    @patch('utils.resilient_llm.build_chat_model')
+    @patch('llm.resilient_llm.build_chat_model')
     def test_iter_models_prefers_light_for_order_action_classify(self, mock_build_chat_model):
         models = {
             'primary-model': object(),
@@ -85,8 +91,8 @@ class TaskModelRoutingTest(unittest.TestCase):
 
         self.assertEqual(labels, ['light', 'primary', 'fallback'])
 
-    @patch('utils.resilient_llm.build_structured_llm', side_effect=lambda model, schema: model)
-    @patch('utils.resilient_llm.build_chat_model')
+    @patch('llm.resilient_llm.build_structured_llm', side_effect=lambda model, schema: model)
+    @patch('llm.resilient_llm.build_chat_model')
     def test_invoke_structured_falls_back_from_light_to_primary(self, mock_build_chat_model, _mock_structured):
         calls: list[str] = []
         models = {

@@ -1,6 +1,9 @@
 """
-mcp_travel_read_server.py：统一只读 MCP 服务器，负责天气、票务与当前时间查询。
+功能：实现 TravelRead MCP 服务，提供时间、天气和票务只读工具。
+作用：作为只读工具边界，把数据库访问、缓存和 JSON 返回从 agent 中剥离出来。
+实现方式：基于 FastMCP 注册工具函数，内部接数据库和 Redis 并返回结构化结果。
 """
+
 import hashlib
 import json
 import os
@@ -13,12 +16,12 @@ from mcp.server.fastmcp import FastMCP
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import Config
-from create_logger import logger
-from utils.cache import RedisCacheClient
-from utils.db import get_db_connection
-from utils.format import DateEncoder, default_encoder
-from utils.time_utils import get_current_time_payload
+from core.config import Config
+from core.logging import logger
+from infra.cache import RedisCacheClient
+from infra.db import get_db_connection
+from infra.json_encoder import DateEncoder, default_encoder
+from core.clock import get_current_time_payload
 
 
 conf = Config()

@@ -1,3 +1,9 @@
+"""
+功能：实现 skill 资产的解析和渲染构建逻辑。
+作用：把 SKILL.md、assets 和 references 解析成可用于 Prompt 的文本对象。
+实现方式：扫描 markdown 资产、解析 include 指令并缓存构建结果。
+"""
+
 from __future__ import annotations
 
 import re
