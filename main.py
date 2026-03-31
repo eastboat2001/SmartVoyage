@@ -13,7 +13,7 @@ conf = Config()
 # 初始化全局变量，用于保存 CLI 会话状态
 messages = []  # 存储对话历史消息列表，每个元素为字典{"role": "user/assistant", "content": "消息内容"}
 agent_metadata = {}
-conversation_history = ""  # 存储整个对话历史字符串，用于意图识别
+conversation_history = ""  # 存储整个用户的对话历史字符串，用于意图识别，messages 是结构化数据，这个是字符串形式，通常更适合做关键词匹配、规则判断、意图识别或日志分析。
 supervisor = None
 pending_order_context = {}
 

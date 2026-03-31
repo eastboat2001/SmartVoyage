@@ -31,6 +31,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from core.config import Config  # noqa: E402
+
 sys.path.insert(0, str(ROOT / "mcp_server"))
 from mcp_order_server import OrderService  # noqa: E402
 from agents.supervisor import SmartVoyageSupervisor  # noqa: E402
@@ -55,8 +56,7 @@ def assert_mcp_services_available() -> None:
     if unavailable:
         detail = " | ".join(unavailable)
         raise RuntimeError(
-            "未检测到必需的 MCP 服务，请先启动 `run_all.py`。"
-            f" 连接检查失败: {detail}"
+            f"未检测到必需的 MCP 服务，请先启动 `run_all.py`。 连接检查失败: {detail}"
         )
 
 
@@ -114,7 +114,9 @@ def build_inputs(case: dict[str, Any]) -> dict[str, Any]:
         "setup_profile": case.get("setup_profile", "baseline"),
         "db_assertions": case.get("db_assertions", {}),
         "now_override": case.get("now_override", ""),
-        "auto_approve_hitl": bool(case.get("auto_approve_hitl", case.get("side_effect", False))),
+        "auto_approve_hitl": bool(
+            case.get("auto_approve_hitl", case.get("side_effect", False))
+        ),
     }
 
 
@@ -297,15 +299,21 @@ def capture_db_metrics(case_inputs: dict[str, Any], config: Config) -> dict[str,
     return metrics
 
 
-def run_case(turns: list[str], case_inputs: dict[str, Any] | None = None) -> dict[str, Any]:
+def run_case(
+    turns: list[str], case_inputs: dict[str, Any] | None = None
+) -> dict[str, Any]:
     case_inputs = case_inputs or {}
     with case_now_override(case_inputs):
         config = Config()
-        if case_inputs.get("side_effect"):
-            reset_database(config)
-            seed_case_setup(case_inputs, config)
+        # 每个 case 都从同一份基线数据库开始，避免副作用 case 污染后续无副作用 case。
+        reset_database(config)
+        seed_case_setup(case_inputs, config)
 
-        db_metrics_before = capture_db_metrics(case_inputs, config) if case_inputs.get("side_effect") else {}
+        db_metrics_before = (
+            capture_db_metrics(case_inputs, config)
+            if case_inputs.get("side_effect")
+            else {}
+        )
 
         orchestrator = SmartVoyageSupervisor(config)
         conversation_history = ""
@@ -322,7 +330,10 @@ def run_case(turns: list[str], case_inputs: dict[str, Any] | None = None) -> dic
             conversation_history += f"\nUser: {turn}\nAssistant: {assistant_response}"
             pending_order_context = result.get("pending_order_context", {}) or {}
 
-            if case_inputs.get("auto_approve_hitl") and pending_order_context.get("action") == "hitl_review":
+            if (
+                case_inputs.get("auto_approve_hitl")
+                and pending_order_context.get("action") == "hitl_review"
+            ):
                 approval_turn = "yes"
                 result = orchestrator.process_user_input(
                     approval_turn,
@@ -330,12 +341,18 @@ def run_case(turns: list[str], case_inputs: dict[str, Any] | None = None) -> dic
                     pending_order_context,
                 )
                 assistant_response = result["response"]
-                conversation_history += f"\nUser: {approval_turn}\nAssistant: {assistant_response}"
+                conversation_history += (
+                    f"\nUser: {approval_turn}\nAssistant: {assistant_response}"
+                )
                 pending_order_context = result.get("pending_order_context", {}) or {}
 
         assert result is not None
 
-        db_metrics_after = capture_db_metrics(case_inputs, config) if case_inputs.get("side_effect") else {}
+        db_metrics_after = (
+            capture_db_metrics(case_inputs, config)
+            if case_inputs.get("side_effect")
+            else {}
+        )
 
         return {
             "response": result["response"],
@@ -349,7 +366,9 @@ def run_case(turns: list[str], case_inputs: dict[str, Any] | None = None) -> dic
         }
 
 
-def intent_match(inputs: dict[str, Any], outputs: dict[str, Any], reference_outputs: dict[str, Any]) -> dict[str, Any]:
+def intent_match(
+    inputs: dict[str, Any], outputs: dict[str, Any], reference_outputs: dict[str, Any]
+) -> dict[str, Any]:
     expected = reference_outputs.get("intents", [])
     actual = outputs.get("intents", [])
     score = 1 if actual == expected else 0
@@ -360,7 +379,9 @@ def intent_match(inputs: dict[str, Any], outputs: dict[str, Any], reference_outp
     }
 
 
-def route_match(inputs: dict[str, Any], outputs: dict[str, Any], reference_outputs: dict[str, Any]) -> dict[str, Any]:
+def route_match(
+    inputs: dict[str, Any], outputs: dict[str, Any], reference_outputs: dict[str, Any]
+) -> dict[str, Any]:
     expected_any = reference_outputs.get("routed_agents_any", [])
     actual = outputs.get("routed_agents", [])
     score = 1 if all(agent in actual for agent in expected_any) else 0
@@ -378,14 +399,19 @@ def _response_semantic_precheck(
     intents = inputs.get("case_id", "")
     response = str(outputs.get("response", ""))
 
-    if response.startswith("交通读取服务当前不可用") or response.startswith("订单服务当前不可用"):
+    if response.startswith("交通读取服务当前不可用") or response.startswith(
+        "订单服务当前不可用"
+    ):
         return {
             "key": "response_semantic_match",
             "score": 0,
             "comment": "explicit service unavailable response",
         }
 
-    if intents in {"base_009_transport_decision_read_only", "base_013_transport_decision_tomorrow_read_only"}:
+    if intents in {
+        "base_009_transport_decision_read_only",
+        "base_013_transport_decision_tomorrow_read_only",
+    }:
         required_sections = ["天气判断：", "出行建议：", "票务结果："]
         if all(section in response for section in required_sections):
             return {
@@ -410,10 +436,18 @@ def response_semantic_match(
         "case_id": inputs.get("case_id", ""),
         "description": inputs.get("description", ""),
         "turns": json.dumps(inputs.get("turns", []), ensure_ascii=False),
-        "expected_intents": json.dumps(reference_outputs.get("intents", []), ensure_ascii=False),
-        "expected_routes": json.dumps(reference_outputs.get("routed_agents_any", []), ensure_ascii=False),
-        "keywords_all": json.dumps(reference_outputs.get("response_keywords_all", []), ensure_ascii=False),
-        "keywords_any": json.dumps(reference_outputs.get("response_keywords_any", []), ensure_ascii=False),
+        "expected_intents": json.dumps(
+            reference_outputs.get("intents", []), ensure_ascii=False
+        ),
+        "expected_routes": json.dumps(
+            reference_outputs.get("routed_agents_any", []), ensure_ascii=False
+        ),
+        "keywords_all": json.dumps(
+            reference_outputs.get("response_keywords_all", []), ensure_ascii=False
+        ),
+        "keywords_any": json.dumps(
+            reference_outputs.get("response_keywords_any", []), ensure_ascii=False
+        ),
         "actual_response": outputs.get("response", ""),
     }
 
@@ -475,13 +509,17 @@ def db_state_match(
         label = item["label"]
         actual_delta = after.get(label, 0) - before.get(label, 0)
         if actual_delta != item["delta"]:
-            mismatches.append(f"{label}: expected {item['delta']}, actual {actual_delta}")
+            mismatches.append(
+                f"{label}: expected {item['delta']}, actual {actual_delta}"
+            )
 
     for item in assertions.get("field_deltas", []):
         label = item["label"]
         actual_delta = after.get(label, 0) - before.get(label, 0)
         if actual_delta != item["delta"]:
-            mismatches.append(f"{label}: expected {item['delta']}, actual {actual_delta}")
+            mismatches.append(
+                f"{label}: expected {item['delta']}, actual {actual_delta}"
+            )
 
     return {
         "key": "db_state_match",
@@ -491,7 +529,9 @@ def db_state_match(
 
 
 def run_dataset(dataset_name: str) -> None:
-    experiment_prefix = f"smartvoyage-regression-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    experiment_prefix = (
+        f"smartvoyage-regression-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    )
 
     def target(inputs: dict[str, Any]) -> dict[str, Any]:
         return run_case(inputs["turns"], case_inputs=inputs)
@@ -509,12 +549,15 @@ def run_dataset(dataset_name: str) -> None:
         data=dataset_name,
         evaluators=evaluators,
         experiment_prefix=experiment_prefix,
+        max_concurrency=1,
     )
     print(results)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run SmartVoyage LangSmith evaluation.")
+    parser = argparse.ArgumentParser(
+        description="Run SmartVoyage LangSmith evaluation."
+    )
     parser.add_argument("--dataset-name", default=DEFAULT_DATASET_NAME)
     parser.add_argument("--sync-dataset", action="store_true")
     parser.add_argument("--replace-dataset", action="store_true")

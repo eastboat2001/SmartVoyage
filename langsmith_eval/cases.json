@@ -454,5 +454,540 @@
       ],
       "response_keywords_any": []
     }
+  },
+  {
+    "case_id": "base_020_weather_query_unknown_city_no_data",
+    "description": "查询数据库中不存在的城市天气时，应返回无数据提示而不是报错。",
+    "turns": [
+      "查询2026-03-21南京的天气"
+    ],
+    "reference_output": {
+      "intents": [
+        "weather"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "TravelReadSubagent"
+      ],
+      "response_keywords_all": [
+        "未找到天气数据"
+      ],
+      "response_keywords_any": [
+        "请确认城市",
+        "日期"
+      ]
+    }
+  },
+  {
+    "case_id": "base_021_my_orders_seeded_not_empty",
+    "description": "当存在已下单记录时，查询我的订单应返回具体订单而不是空结果。",
+    "turns": [
+      "查询我的订单"
+    ],
+    "side_effect": true,
+    "setup_profile": "seed_train_order",
+    "reference_output": {
+      "intents": [
+        "my_orders"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "OrderSubagent"
+      ],
+      "response_keywords_all": [
+        "订单#"
+      ],
+      "response_keywords_any": [
+        "G5",
+        "北京",
+        "上海"
+      ]
+    }
+  },
+  {
+    "case_id": "base_022_order_create_train_with_side_effect",
+    "description": "显式下单高铁票时，应完成审批、创建订单并扣减库存。",
+    "turns": [
+      "帮我预订2026-03-21北京到上海的G5二等座高铁票"
+    ],
+    "side_effect": true,
+    "auto_approve_hitl": true,
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "booked_g5_orders",
+          "table": "orders",
+          "filter": {
+            "status": "booked",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座"
+          },
+          "delta": 1
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "g5_remaining_seats",
+          "table": "train_tickets",
+          "field": "remaining_seats",
+          "filter": {
+            "train_number": "G5",
+            "seat_type": "二等座"
+          },
+          "delta": -1
+        }
+      ]
+    },
+    "reference_output": {
+      "intents": [
+        "order"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "OrderSubagent"
+      ],
+      "response_keywords_all": [
+        "预订成功"
+      ],
+      "response_keywords_any": [
+        "订单号",
+        "订票结果",
+        "G5"
+      ]
+    }
+  },
+  {
+    "case_id": "base_023_order_create_duplicate_train_rejected",
+    "description": "用户已存在同一张票的订单时，再次下单应命中重复订单保护而不重复扣库存。",
+    "turns": [
+      "帮我预订2026-03-21北京到上海的G5二等座高铁票"
+    ],
+    "side_effect": true,
+    "setup_profile": "seed_train_order",
+    "auto_approve_hitl": true,
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "booked_g5_orders",
+          "table": "orders",
+          "filter": {
+            "status": "booked",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座"
+          },
+          "delta": 0
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "g5_remaining_seats",
+          "table": "train_tickets",
+          "field": "remaining_seats",
+          "filter": {
+            "train_number": "G5",
+            "seat_type": "二等座"
+          },
+          "delta": 0
+        }
+      ]
+    },
+    "reference_output": {
+      "intents": [
+        "order"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "OrderSubagent"
+      ],
+      "response_keywords_all": [
+        "重复订单"
+      ],
+      "response_keywords_any": [
+        "已预订",
+        "G5",
+        "二等座"
+      ]
+    }
+  },
+  {
+    "case_id": "base_024_order_cancel_train_with_side_effect",
+    "description": "提供完整退票信息时，应完成审批、取消订单并回补库存。",
+    "turns": [
+      "帮我退掉2026-03-21北京到上海的G5二等座高铁票"
+    ],
+    "side_effect": true,
+    "setup_profile": "seed_train_order",
+    "auto_approve_hitl": true,
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "booked_g5_orders",
+          "table": "orders",
+          "filter": {
+            "status": "booked",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座"
+          },
+          "delta": -1
+        },
+        {
+          "label": "cancelled_g5_orders",
+          "table": "orders",
+          "filter": {
+            "status": "cancelled",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座"
+          },
+          "delta": 1
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "g5_remaining_seats",
+          "table": "train_tickets",
+          "field": "remaining_seats",
+          "filter": {
+            "train_number": "G5",
+            "seat_type": "二等座"
+          },
+          "delta": 1
+        }
+      ]
+    },
+    "reference_output": {
+      "intents": [
+        "cancel_order"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "OrderSubagent"
+      ],
+      "response_keywords_all": [
+        "退票成功"
+      ],
+      "response_keywords_any": [
+        "已取消订单",
+        "G5"
+      ]
+    }
+  },
+  {
+    "case_id": "base_025_order_change_train_with_side_effect",
+    "description": "提供完整改签信息时，应完成审批、生成新订单并同步调整旧票和新票库存。",
+    "turns": [
+      "把我2026-03-21北京到上海的G5二等座高铁票改签到2026-03-22二等座"
+    ],
+    "side_effect": true,
+    "setup_profile": "seed_train_order",
+    "auto_approve_hitl": true,
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "changed_g5_orders",
+          "table": "orders",
+          "filter": {
+            "status": "changed",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座"
+          },
+          "delta": 1
+        },
+        {
+          "label": "booked_g13_orders",
+          "table": "orders",
+          "filter": {
+            "status": "booked",
+            "transport_no": "G13",
+            "ticket_or_room_type": "二等座"
+          },
+          "delta": 1
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "g5_remaining_seats",
+          "table": "train_tickets",
+          "field": "remaining_seats",
+          "filter": {
+            "train_number": "G5",
+            "seat_type": "二等座"
+          },
+          "delta": 1
+        },
+        {
+          "label": "g13_remaining_seats",
+          "table": "train_tickets",
+          "field": "remaining_seats",
+          "filter": {
+            "train_number": "G13",
+            "seat_type": "二等座"
+          },
+          "delta": -1
+        }
+      ]
+    },
+    "reference_output": {
+      "intents": [
+        "change_order"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "OrderSubagent"
+      ],
+      "response_keywords_all": [
+        "改签成功"
+      ],
+      "response_keywords_any": [
+        "新订单#",
+        "G13",
+        "2026-03-22"
+      ]
+    }
+  },
+  {
+    "case_id": "base_026_cancel_order_follow_up_resume_success",
+    "description": "退票首轮信息不足时，应先补问；用户补全后，应恢复上下文并成功完成退票。",
+    "turns": [
+      "帮我退票",
+      "退2026-03-21北京到上海的G5二等座高铁票"
+    ],
+    "side_effect": true,
+    "setup_profile": "seed_train_order",
+    "auto_approve_hitl": true,
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "booked_g5_orders",
+          "table": "orders",
+          "filter": {
+            "status": "booked",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座"
+          },
+          "delta": -1
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "g5_remaining_seats",
+          "table": "train_tickets",
+          "field": "remaining_seats",
+          "filter": {
+            "train_number": "G5",
+            "seat_type": "二等座"
+          },
+          "delta": 1
+        }
+      ]
+    },
+    "reference_output": {
+      "intents": [
+        "cancel_order"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "OrderSubagent"
+      ],
+      "response_keywords_all": [
+        "退票成功"
+      ],
+      "response_keywords_any": [
+        "已取消订单",
+        "G5"
+      ]
+    }
+  },
+  {
+    "case_id": "base_027_change_order_follow_up_resume_success",
+    "description": "改签首轮信息不足时，应先补问；用户补全后，应恢复上下文并成功改签。",
+    "turns": [
+      "帮我改签高铁票",
+      "把2026-03-21北京到上海的G5二等座高铁票改签到2026-03-22二等座"
+    ],
+    "side_effect": true,
+    "setup_profile": "seed_train_order",
+    "auto_approve_hitl": true,
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "booked_g13_orders",
+          "table": "orders",
+          "filter": {
+            "status": "booked",
+            "transport_no": "G13",
+            "ticket_or_room_type": "二等座"
+          },
+          "delta": 1
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "g13_remaining_seats",
+          "table": "train_tickets",
+          "field": "remaining_seats",
+          "filter": {
+            "train_number": "G13",
+            "seat_type": "二等座"
+          },
+          "delta": -1
+        }
+      ]
+    },
+    "reference_output": {
+      "intents": [
+        "change_order"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "OrderSubagent"
+      ],
+      "response_keywords_all": [
+        "改签成功"
+      ],
+      "response_keywords_any": [
+        "新订单#",
+        "G13",
+        "2026-03-22"
+      ]
+    }
+  },
+  {
+    "case_id": "base_028_hitl_reply_ambiguous_then_confirm_create_order",
+    "description": "审批场景中，模糊回复应继续追问；后续明确确认后，应恢复并成功完成下单。",
+    "turns": [
+      "帮我预订2026-03-21北京到上海的G5二等座高铁票",
+      "什么意思",
+      "yes"
+    ],
+    "side_effect": true,
+    "auto_approve_hitl": false,
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "booked_g5_orders",
+          "table": "orders",
+          "filter": {
+            "status": "booked",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座"
+          },
+          "delta": 1
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "g5_remaining_seats",
+          "table": "train_tickets",
+          "field": "remaining_seats",
+          "filter": {
+            "train_number": "G5",
+            "seat_type": "二等座"
+          },
+          "delta": -1
+        }
+      ]
+    },
+    "reference_output": {
+      "intents": [
+        "order"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "OrderSubagent"
+      ],
+      "response_keywords_all": [
+        "预订成功"
+      ],
+      "response_keywords_any": [
+        "订单号",
+        "订票结果",
+        "G5"
+      ]
+    }
+  },
+  {
+    "case_id": "base_029_out_of_scope_rejected",
+    "description": "非交通出行领域的问题应被识别为越界请求，而不是误路由到查询或订单链路。",
+    "turns": [
+      "帮我写一个 Python 冒泡排序"
+    ],
+    "reference_output": {
+      "intents": [
+        "out_of_scope"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [],
+      "response_keywords_all": [],
+      "response_keywords_any": [
+        "交通",
+        "出行",
+        "票务",
+        "订单"
+      ]
+    }
+  },
+  {
+    "case_id": "base_030_cancel_order_review_reject_no_side_effect",
+    "description": "退票进入审批后，如果用户拒绝执行，应结束流程且不产生数据库副作用。",
+    "turns": [
+      "帮我退掉2026-03-21北京到上海的G5二等座高铁票",
+      "no"
+    ],
+    "side_effect": true,
+    "setup_profile": "seed_train_order",
+    "auto_approve_hitl": false,
+    "db_assertions": {
+      "row_count_deltas": [
+        {
+          "label": "booked_g5_orders",
+          "table": "orders",
+          "filter": {
+            "status": "booked",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座"
+          },
+          "delta": 0
+        },
+        {
+          "label": "cancelled_g5_orders",
+          "table": "orders",
+          "filter": {
+            "status": "cancelled",
+            "transport_no": "G5",
+            "ticket_or_room_type": "二等座"
+          },
+          "delta": 0
+        }
+      ],
+      "field_deltas": [
+        {
+          "label": "g5_remaining_seats",
+          "table": "train_tickets",
+          "field": "remaining_seats",
+          "filter": {
+            "train_number": "G5",
+            "seat_type": "二等座"
+          },
+          "delta": 0
+        }
+      ]
+    },
+    "reference_output": {
+      "intents": [
+        "cancel_order"
+      ],
+      "pending_empty": true,
+      "routed_agents_any": [
+        "OrderSubagent"
+      ],
+      "response_keywords_all": [
+        "已取消本次操作"
+      ],
+      "response_keywords_any": [
+        "未执行实际下单",
+        "退票",
+        "改签"
+      ]
+    }
   }
 ]

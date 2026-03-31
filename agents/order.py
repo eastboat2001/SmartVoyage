@@ -23,12 +23,24 @@ from contracts.agent_protocol import LocalAgentRequest, LocalAgentResponse
 from core.errors import format_exception_details
 from core.prompts import SmartVoyagePrompts
 from llm.model_factory import build_order_agent, extract_text_from_agent_result
-from observability.metrics import clone_metrics, create_metrics, ensure_metrics, increment_metric, merge_metrics, track_phase
+from observability.metrics import (
+    clone_metrics,
+    create_metrics,
+    ensure_metrics,
+    increment_metric,
+    merge_metrics,
+    track_phase,
+)
 from contracts.order_action_tag import extract_order_action, strip_order_action
 from infra.persistent_checkpointer import PersistentInMemorySaver
 from observability.request_context import ensure_request_id, set_request_id
 from llm.resilient_llm import ResilientModelInvoker
-from contracts.structured_outputs import DateResolutionResult, OrderActionDecisionResult, OrderOperationExtractionResult, ReviewDecisionResult
+from contracts.structured_outputs import (
+    DateResolutionResult,
+    OrderActionDecisionResult,
+    OrderOperationExtractionResult,
+    ReviewDecisionResult,
+)
 from core.clock import get_current_date_str
 from contracts.travel_read_tag import with_travel_read_kind
 
@@ -99,7 +111,10 @@ def _fast_normalize_date(query: str, current_date: str) -> str | None:
         if token in normalized:
             return (base_date + timedelta(days=offset)).strftime("%Y-%m-%d")
 
-    full_match = re.search(r"(?P<year>20\d{2})[-/.年](?P<month>\d{1,2})[-/.月](?P<day>\d{1,2})日?", normalized)
+    full_match = re.search(
+        r"(?P<year>20\d{2})[-/.年](?P<month>\d{1,2})[-/.月](?P<day>\d{1,2})日?",
+        normalized,
+    )
     if full_match:
         return f"{int(full_match.group('year')):04d}-{int(full_match.group('month')):02d}-{int(full_match.group('day')):02d}"
 
@@ -107,12 +122,17 @@ def _fast_normalize_date(query: str, current_date: str) -> str | None:
     if month_day_match:
         return f"{base_date.year:04d}-{int(month_day_match.group('month')):02d}-{int(month_day_match.group('day')):02d}"
 
-    if not any(token in normalized for token in ("年", "月", "日", "号", "今天", "明天", "后天")):
+    if not any(
+        token in normalized
+        for token in ("年", "月", "日", "号", "今天", "明天", "后天")
+    ):
         return ""
     return None
 
 
-def extract_departure_date(conversation: str, metrics: dict[str, Any] | None = None) -> str:
+def extract_departure_date(
+    conversation: str, metrics: dict[str, Any] | None = None
+) -> str:
     query = latest_user_request(conversation)
     current_date = get_current_date_str(conf)
     fast_date = _fast_normalize_date(query, current_date)
@@ -143,7 +163,9 @@ def latest_user_request(conversation: str) -> str:
     return conversation.strip()
 
 
-PENDING_CONTEXT_PATTERN = re.compile(r"\[PENDING_ORDER_CONTEXT\](?P<payload>.*?)\[/PENDING_ORDER_CONTEXT\]", re.DOTALL)
+PENDING_CONTEXT_PATTERN = re.compile(
+    r"\[PENDING_ORDER_CONTEXT\](?P<payload>.*?)\[/PENDING_ORDER_CONTEXT\]", re.DOTALL
+)
 
 
 def extract_pending_context(query: str) -> dict[str, Any]:
@@ -182,7 +204,9 @@ def classify_order_action(
         return explicit_action
 
     result = model_invoker.invoke_structured(
-        SmartVoyagePrompts.order_action_prompt(pending_context=pending_context_summary(pending_context)),
+        SmartVoyagePrompts.order_action_prompt(
+            pending_context=pending_context_summary(pending_context)
+        ),
         OrderActionDecisionResult,
         {
             "pending_context": pending_context_summary(pending_context),
@@ -198,10 +222,14 @@ def classify_order_action(
 
 
 def is_hitl_review_pending(pending_context: dict[str, Any]) -> bool:
-    return pending_context.get("action") == "hitl_review" and bool(pending_context.get("thread_id"))
+    return pending_context.get("action") == "hitl_review" and bool(
+        pending_context.get("thread_id")
+    )
 
 
-def parse_review_decision(query: str, review_payload: dict[str, Any], metrics: dict[str, Any] | None = None) -> tuple[Literal["approved", "rejected"] | None, str]:
+def parse_review_decision(
+    query: str, review_payload: dict[str, Any], metrics: dict[str, Any] | None = None
+) -> tuple[Literal["approved", "rejected"] | None, str]:
     normalized_query = strip_order_action(strip_pending_context(query)).strip()
     result = model_invoker.invoke_structured(
         SmartVoyagePrompts.review_decision_prompt(),
@@ -219,24 +247,41 @@ def parse_review_decision(query: str, review_payload: dict[str, Any], metrics: d
         return "approved", ""
     if result.decision == "rejected":
         return "rejected", ""
-    return None, (result.follow_up_message.strip() or "这是一个待审批操作。请明确回复确认执行或取消执行。")
+    return None, (
+        result.follow_up_message.strip()
+        or "这是一个待审批操作。请明确回复确认执行或取消执行。"
+    )
 
 
-def normalize_missing_fields(action: str, result: OrderOperationExtractionResult) -> list[str]:
+def normalize_missing_fields(
+    action: str, result: OrderOperationExtractionResult
+) -> list[str]:
     missing = {field.strip() for field in result.missing_fields if field.strip()}
     if not result.order_type:
         missing.add("order_type")
-    has_current_selector = bool(result.current_transport_no or (result.current_departure_date and result.departure_city and result.arrival_city))
+    has_current_selector = bool(
+        result.current_transport_no
+        or (
+            result.current_departure_date
+            and result.departure_city
+            and result.arrival_city
+        )
+    )
     if not has_current_selector:
         missing.add("current_order_selector")
-    if action == "change_order" and not (result.new_departure_date or result.new_transport_no or result.new_ticket_type):
+    if action == "change_order" and not (
+        result.new_departure_date or result.new_transport_no or result.new_ticket_type
+    ):
         missing.add("new_target")
     return sorted(missing)
 
 
 def default_follow_up_message(action: str, missing_fields: list[str]) -> str:
     if action == "cancel_order":
-        if "order_type" in missing_fields and "current_order_selector" in missing_fields:
+        if (
+            "order_type" in missing_fields
+            and "current_order_selector" in missing_fields
+        ):
             return "请补充要退的是高铁票还是机票，以及至少一组订单条件，例如车次/航班号，或日期加出发到达城市。"
         if "order_type" in missing_fields:
             return "请补充要退的是高铁票还是机票。"
@@ -253,7 +298,13 @@ def default_follow_up_message(action: str, missing_fields: list[str]) -> str:
     return f"请补充{joined}，我再继续帮你改签。"
 
 
-def build_pending_order_context(*, action: str, query: str, extraction: OrderOperationExtractionResult, missing_fields: list[str]) -> dict[str, Any]:
+def build_pending_order_context(
+    *,
+    action: str,
+    query: str,
+    extraction: OrderOperationExtractionResult,
+    missing_fields: list[str],
+) -> dict[str, Any]:
     extracted_fields = {
         key: value
         for key, value in {
@@ -278,12 +329,18 @@ def build_pending_order_context(*, action: str, query: str, extraction: OrderOpe
 
 
 def pending_context_summary(pending_context: dict[str, Any]) -> str:
-    return "无" if not pending_context else json.dumps(pending_context, ensure_ascii=False)
+    return (
+        "无" if not pending_context else json.dumps(pending_context, ensure_ascii=False)
+    )
 
 
 async def run_order_agent(query: str, metrics: dict[str, Any] | None = None):
     try:
-        async with streamablehttp_client("http://127.0.0.1:8003/mcp") as (read, write, _):
+        async with streamablehttp_client("http://127.0.0.1:8003/mcp") as (
+            read,
+            write,
+            _,
+        ):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools = await load_mcp_tools(session)
@@ -294,16 +351,25 @@ async def run_order_agent(query: str, metrics: dict[str, Any] | None = None):
                     metrics=metrics,
                     phase_name="order_agent",
                 )
-                return {"status": "success", "message": extract_text_from_agent_result(response)}
+                return {
+                    "status": "success",
+                    "message": extract_text_from_agent_result(response),
+                }
     except Exception as exc:
         error_detail = format_exception_details(exc)
         logger.error(f"订单 MCP 调用出错：{error_detail}")
         return {"status": "error", "message": f"订单 MCP 调用出错：{error_detail}"}
 
 
-async def query_my_orders(username: str, departure_date: str, metrics: dict[str, Any] | None = None):
+async def query_my_orders(
+    username: str, departure_date: str, metrics: dict[str, Any] | None = None
+):
     try:
-        async with streamablehttp_client("http://127.0.0.1:8003/mcp") as (read, write, _):
+        async with streamablehttp_client("http://127.0.0.1:8003/mcp") as (
+            read,
+            write,
+            _,
+        ):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 params = {"username": username}
@@ -319,9 +385,15 @@ async def query_my_orders(username: str, departure_date: str, metrics: dict[str,
         return f"查询订单失败：{error_detail}"
 
 
-async def invoke_order_tool(tool_name: str, params: dict[str, Any], metrics: dict[str, Any] | None = None) -> str:
+async def invoke_order_tool(
+    tool_name: str, params: dict[str, Any], metrics: dict[str, Any] | None = None
+) -> str:
     try:
-        async with streamablehttp_client("http://127.0.0.1:8003/mcp") as (read, write, _):
+        async with streamablehttp_client("http://127.0.0.1:8003/mcp") as (
+            read,
+            write,
+            _,
+        ):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 increment_metric(metrics, "tool_call_count")
@@ -400,7 +472,9 @@ class OrderSubagent:
     ) -> tuple[dict[str, str], list[str], str, dict[str, Any] | None]:
         current_date = get_current_date_str(conf)
         extraction = model_invoker.invoke_structured(
-            SmartVoyagePrompts.order_operation_extraction_prompt(action=action, pending_context=pending_context_summary(pending_context)),
+            SmartVoyagePrompts.order_operation_extraction_prompt(
+                action=action, pending_context=pending_context_summary(pending_context)
+            ),
             OrderOperationExtractionResult,
             {
                 "conversation_history": summarize_conversation(conversation),
@@ -414,7 +488,11 @@ class OrderSubagent:
             phase_name=f"order_operation_extract_{action}",
         )
         extraction_data = extraction.model_dump()
-        pending_fields = pending_context.get("extracted_fields", {}) if isinstance(pending_context, dict) else {}
+        pending_fields = (
+            pending_context.get("extracted_fields", {})
+            if isinstance(pending_context, dict)
+            else {}
+        )
         if isinstance(pending_fields, dict):
             for key, value in pending_fields.items():
                 if key in extraction_data and not extraction_data.get(key) and value:
@@ -422,7 +500,10 @@ class OrderSubagent:
         extraction = OrderOperationExtractionResult(**extraction_data)
         logger.info(f"订单参数抽取结果: {extraction.model_dump()}")
         missing_fields = normalize_missing_fields(action, extraction)
-        follow_up_message = extraction.follow_up_message.strip() or default_follow_up_message(action, missing_fields)
+        follow_up_message = (
+            extraction.follow_up_message.strip()
+            or default_follow_up_message(action, missing_fields)
+        )
         if missing_fields:
             pending = build_pending_order_context(
                 action=action,
@@ -432,7 +513,11 @@ class OrderSubagent:
             )
             return {}, missing_fields, follow_up_message, pending
 
-        payload = {"order_type": extraction.order_type, "departure_city": extraction.departure_city, "arrival_city": extraction.arrival_city}
+        payload = {
+            "order_type": extraction.order_type,
+            "departure_city": extraction.departure_city,
+            "arrival_city": extraction.arrival_city,
+        }
         if action == "cancel_order":
             payload.update(
                 {
@@ -461,7 +546,9 @@ class OrderSubagent:
         pending_context = extract_pending_context(latest_query)
         clean_query = strip_order_action(strip_pending_context(latest_query))
         username = extract_username(conversation)
-        action = classify_order_action(conversation, latest_query, clean_query, pending_context, metrics)
+        action = classify_order_action(
+            conversation, latest_query, clean_query, pending_context, metrics
+        )
         next_state: dict[str, Any] = {
             "latest_query": latest_query,
             "clean_query": clean_query,
@@ -471,12 +558,14 @@ class OrderSubagent:
             "metrics": metrics,
         }
         if action in {"cancel_order", "change_order"}:
-            payload, missing_fields, follow_up_message, pending = self._extract_operation_payload(
-                action=action,
-                conversation=conversation,
-                query=clean_query,
-                pending_context=pending_context,
-                metrics=metrics,
+            payload, missing_fields, follow_up_message, pending = (
+                self._extract_operation_payload(
+                    action=action,
+                    conversation=conversation,
+                    query=clean_query,
+                    pending_context=pending_context,
+                    metrics=metrics,
+                )
             )
             next_state["operation_payload"] = payload
             next_state["missing_fields"] = missing_fields
@@ -515,9 +604,11 @@ class OrderSubagent:
     async def _lookup_tickets_node(self, state: OrderWorkflowState) -> dict[str, Any]:
         metrics = ensure_metrics(state.get("metrics"))
         raw_query = latest_user_request(state["conversation"])
-        ticket_query = with_travel_read_kind(strip_order_action(strip_pending_context(raw_query)), "ticket")
+        ticket_query = with_travel_read_kind(
+            strip_order_action(strip_pending_context(raw_query)), "ticket"
+        )
         request_id = ensure_request_id()
-        ticket_result = self.travel_read_agent.invoke(
+        ticket_result = await self.travel_read_agent.ainvoke(
             LocalAgentRequest(
                 text=f"User: {ticket_query}",
                 conversation_history=f"User: {ticket_query}",
@@ -530,7 +621,9 @@ class OrderSubagent:
         if ticket_result.state != "completed":
             logger.info(f"余票未查到：{ticket_result.text}")
             final_state: Literal["completed", "failed", "input_required"] = (
-                "input_required" if ticket_result.state == "input_required" else "failed"
+                "input_required"
+                if ticket_result.state == "input_required"
+                else "failed"
             )
             return {
                 "ticket_task_state": ticket_result.state,
@@ -579,9 +672,12 @@ class OrderSubagent:
             "order_type": payload.get("order_type", ""),
             "departure_city": payload.get("departure_city", ""),
             "arrival_city": payload.get("arrival_city", ""),
-            "departure_date": payload.get("departure_date") or payload.get("current_departure_date", ""),
-            "transport_no": payload.get("transport_no") or payload.get("current_transport_no", ""),
-            "ticket_type": payload.get("ticket_type") or payload.get("current_ticket_type", ""),
+            "departure_date": payload.get("departure_date")
+            or payload.get("current_departure_date", ""),
+            "transport_no": payload.get("transport_no")
+            or payload.get("current_transport_no", ""),
+            "ticket_type": payload.get("ticket_type")
+            or payload.get("current_ticket_type", ""),
             "new_departure_date": payload.get("new_departure_date", ""),
             "new_transport_no": payload.get("new_transport_no", ""),
             "new_ticket_type": payload.get("new_ticket_type", ""),
@@ -611,7 +707,10 @@ class OrderSubagent:
             "review_decision": "rejected",
             "final_state": "completed",
             "final_text": "已取消本次操作，未执行实际下单、退票或改签。",
-            "final_data": {"kind": "transport_order_review", "review_payload": review_payload},
+            "final_data": {
+                "kind": "transport_order_review",
+                "review_payload": review_payload,
+            },
         }
 
     @staticmethod
@@ -623,29 +722,55 @@ class OrderSubagent:
     async def _create_order_node(self, state: OrderWorkflowState) -> dict[str, Any]:
         metrics = ensure_metrics(state.get("metrics"))
         username = state["username"]
-        conversation = state["conversation"]
         ticket_result = state["ticket_result_text"]
         ticket_data = state.get("ticket_result_data", {})
         tickets = ticket_data.get("tickets", [])
-        if tickets:
-            selected = tickets[0]
-            order_type = selected.get("order_type", "")
-            transport_label = "高铁票" if order_type == "train" else "机票"
-            transport_field = "车次" if order_type == "train" else "航班"
-            deterministic_query = (
-                f"当前用户：{username}\n"
-                f"请直接预订{str(selected.get('departure_time', ''))[:10]}"
-                f"{selected.get('departure_city', '')}到{selected.get('arrival_city', '')}的{transport_label}，"
-                f"{transport_field}{selected.get('transport_no', '')}，"
-                f"{selected.get('ticket_type', '')}1张。"
-            )
-            order_result = await run_order_agent(deterministic_query, metrics)
+        if not tickets:
+            return {
+                "final_text": "未找到可用于下单的真实票务结果，请先重新查询后再下单。",
+                "final_state": "failed",
+                "final_data": {
+                    "kind": "transport_order",
+                    "ticket_result": ticket_data,
+                },
+                "metrics": metrics,
+            }
+
+        selected = tickets[0]
+        order_type = str(selected.get("order_type", "")).strip().lower()
+        departure_date = str(selected.get("departure_time", ""))[:10]
+        transport_no = str(selected.get("transport_no", "")).strip()
+        ticket_type = str(selected.get("ticket_type", "")).strip()
+
+        if order_type == "train":
+            tool_name = "order_train"
+            params = {
+                "username": username,
+                "departure_date": departure_date,
+                "train_number": transport_no,
+                "seat_type": ticket_type,
+                "number": 1,
+            }
         else:
-            order_result = await run_order_agent(f"{conversation}\n当前用户：{username}\n余票信息：{ticket_result}", metrics)
-        logger.info(f"MCP 返回: {order_result}")
-        data = order_result.get("message", "")
-        final_state: Literal["completed", "failed", "input_required"] = "completed" if order_result.get("status") == "success" else "failed"
-        final_text = "余票信息：" + ticket_result + "\n订票结果：" + data if final_state == "completed" else data
+            tool_name = "order_flight"
+            params = {
+                "username": username,
+                "departure_date": departure_date,
+                "flight_number": transport_no,
+                "seat_type": ticket_type,
+                "number": 1,
+            }
+
+        tool_result = await invoke_order_tool(tool_name, params, metrics)
+        logger.info(f"直接下单工具返回: {tool_result}")
+        final_state: Literal["completed", "failed", "input_required"] = (
+            "completed" if "预订成功" in tool_result else "failed"
+        )
+        final_text = (
+            "余票信息：" + ticket_result + "\n订票结果：" + tool_result
+            if final_state == "completed"
+            else tool_result
+        )
         return {
             "final_text": final_text,
             "final_state": final_state,
@@ -667,14 +792,20 @@ class OrderSubagent:
         if is_hitl_review_pending(pending_context):
             thread_id = pending_context["thread_id"]
             review_payload = pending_context.get("review_payload", {})
-            decision, follow_up_message = parse_review_decision(latest_query, review_payload, metrics)
+            decision, follow_up_message = parse_review_decision(
+                latest_query, review_payload, metrics
+            )
             if not decision:
                 return LocalAgentResponse(
                     state="input_required",
                     text=follow_up_message,
                     pending_order_context=pending_context,
                     data={"kind": "hitl_review", "review_payload": review_payload},
-                    meta={"thread_id": thread_id, "review_required": True, "metrics": clone_metrics(metrics)},
+                    meta={
+                        "thread_id": thread_id,
+                        "review_required": True,
+                        "metrics": clone_metrics(metrics),
+                    },
                 )
             result = await self.workflow.ainvoke(
                 Command(resume={"decision": decision}),
@@ -683,7 +814,11 @@ class OrderSubagent:
         else:
             thread_id = request_id
             result = await self.workflow.ainvoke(
-                {"conversation": request.text, "now_override": request.now_override, "metrics": metrics},
+                {
+                    "conversation": request.text,
+                    "now_override": request.now_override,
+                    "metrics": metrics,
+                },
                 config={"configurable": {"thread_id": thread_id}},
             )
 
@@ -702,7 +837,11 @@ class OrderSubagent:
                     "resume_intent": interrupt_payload.get("action", "order"),
                 },
                 data={"kind": "hitl_review", "review_payload": interrupt_payload},
-                meta={"thread_id": thread_id, "review_required": True, "metrics": clone_metrics(metrics)},
+                meta={
+                    "thread_id": thread_id,
+                    "review_required": True,
+                    "metrics": clone_metrics(metrics),
+                },
             )
 
         final_text = result.get("final_text", "订单流程执行失败，请重试。")
@@ -719,6 +858,7 @@ class OrderSubagent:
                 "metrics": clone_metrics(result.get("metrics", metrics)),
             },
         )
+
     def invoke(self, request: LocalAgentRequest) -> LocalAgentResponse:
         try:
             return asyncio.run(self.ainvoke(request))
@@ -728,5 +868,3 @@ class OrderSubagent:
                 return loop.run_until_complete(self.ainvoke(request))
             finally:
                 loop.close()
-
-
